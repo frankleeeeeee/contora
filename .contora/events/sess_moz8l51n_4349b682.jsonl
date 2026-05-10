@@ -1,0 +1,16 @@
+{"type":"git_change","modified":[".context-recall/events/sess_moz8l51n_4349b682.jsonl",".context-recall/state.json","package-lock.json","src/extension.ts","src/scanner/workspaceScanner.ts","src/ui/sidebarProvider.ts","src/ui/sidebarPathFilter.ts","src/ui/sidebarViewModel.ts"],"staged":[],"timestamp":1778417452083}
+{"type":"file_focus","file":"README.md","timestamp":1778417458622}
+{"type":"file_focus","file":"package.json","timestamp":1778417449102}
+{"type":"git_change","modified":[".context-recall/events/sess_moz8l51n_4349b682.jsonl",".context-recall/state.json","package-lock.json","src/extension.ts","src/scanner/workspaceScanner.ts","src/ui/sidebarProvider.ts",".contora/events/sess_moz8l51n_4349b682.jsonl","src/ui/sidebarPathFilter.ts","src/ui/sidebarViewModel.ts"],"staged":[],"timestamp":1778417465124}
+{"type":"git_change","modified":[".context-recall/events/sess_moz8l51n_4349b682.jsonl",".context-recall/state.json","package-lock.json","src/extension.ts","src/scanner/workspaceScanner.ts","src/ui/sidebarProvider.ts",".contora/events/sess_moz8l51n_4349b682.jsonl",".contora/state.json","src/ui/sidebarPathFilter.ts","src/ui/sidebarViewModel.ts"],"staged":[],"timestamp":1778417466518}
+{"type":"file_focus","file":"package.json","timestamp":1778418638901}
+{"type":"git_change","modified":[".context-recall/events/sess_moz8l51n_4349b682.jsonl",".context-recall/state.json","package-lock.json","src/extension.ts","src/scanner/workspaceScanner.ts","src/ui/sidebarProvider.ts",".contora/events/sess_moz8l51n_4349b682.jsonl",".contora/state.json","src/ui/sidebarPathFilter.ts","src/ui/sidebarViewModel.ts"],"staged":[],"timestamp":1778418640670}
+{"type":"file_focus","file":"README.md","timestamp":1778418645097}
+{"type":"file_focus","file":"package.json","timestamp":1778418831441}
+{"type":"file_focus","file":"README.md","timestamp":1778418833406}
+{"type":"git_change","modified":[".context-recall/events/sess_moz8l51n_4349b682.jsonl",".context-recall/state.json","package-lock.json","src/extension.ts","src/scanner/workspaceScanner.ts","src/ui/sidebarProvider.ts",".contora/events/sess_moz8l51n_4349b682.jsonl",".contora/state.json","src/ui/sidebarPathFilter.ts","src/ui/sidebarViewModel.ts"],"staged":[],"timestamp":1778418843553}
+{"type":"file_focus","file":"src/ui/sidebarProvider.ts","timestamp":1778419219604}
+{"type":"git_change","modified":[".context-recall/events/sess_moz8l51n_4349b682.jsonl",".context-recall/state.json","package-lock.json","package.json","src/extension.ts","src/scanner/workspaceScanner.ts","src/ui/sidebarProvider.ts",".contora/events/sess_moz8l51n_4349b682.jsonl",".contora/state.json","src/ui/sidebarPathFilter.ts","src/ui/sidebarViewModel.ts"],"staged":[],"timestamp":1778419551038}
+{"type":"file_focus","file":"README.md","timestamp":1778425363856}
+{"type":"git_change","modified":[".context-recall/events/sess_moz8l51n_4349b682.jsonl",".context-recall/state.json","package-lock.json","package.json","src/extension.ts","src/scanner/workspaceScanner.ts","src/ui/sidebarProvider.ts",".contora/events/sess_moz8l51n_4349b682.jsonl",".contora/state.json","src/ui/sidebarPathFilter.ts","src/ui/sidebarViewModel.ts"],"staged":[],"timestamp":1778425371013}
+{"type":"file_focus","file":"src/ui/sidebarProvider.ts","timestamp":1778425374263}

@@ -61,6 +61,7 @@ export class WorkspaceScanner {
     private readonly folder: vscode.WorkspaceFolder,
     private readonly state: StateManager,
     private readonly events?: EventStore,
+    private readonly onAfterPersist?: () => void,
   ) {}
 
   flushNow(): Thenable<void> {
@@ -101,6 +102,7 @@ export class WorkspaceScanner {
       gitStaged: gs.staged,
       gitWorking: gs.working,
     });
+    this.onAfterPersist?.();
   }
 
   start(): void {

@@ -2,7 +2,7 @@
   "name": "contora",
   "displayName": "Contora",
   "description": "Contora: local workspace memory (task, notes, editors, Git), event JSONL, checkpoints, heuristic intent/ranking, ignore rules, token budget — export AI-ready context to clipboard (markdown, JSON, MCP, etc.).",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "license": "MIT",
   "repository": {
     "type": "git",

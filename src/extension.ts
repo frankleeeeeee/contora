@@ -186,7 +186,11 @@ async function mergeDiskIfEnabled(stateManager: StateManager, es: EventStore | u
   }
 }
 
-function startScanners(stateManager: StateManager, eventStore: EventStore): WorkspaceScanner[] {
+function startScanners(
+  stateManager: StateManager,
+  eventStore: EventStore,
+  onAfterPersist?: () => void,
+): WorkspaceScanner[] {
   disposeScanners();
   const folders = vscode.workspace.workspaceFolders;
   if (!folders?.length) {
@@ -194,7 +198,7 @@ function startScanners(stateManager: StateManager, eventStore: EventStore): Work
   }
   const next: WorkspaceScanner[] = [];
   for (const folder of folders) {
-    const s = new WorkspaceScanner(folder, stateManager, eventStore);
+    const s = new WorkspaceScanner(folder, stateManager, eventStore, onAfterPersist);
     s.start();
     next.push(s);
   }
@@ -218,7 +222,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const syncWorkspace = async (): Promise<void> => {
     globalEventStore = createEventStore(stateManager);
-    startScanners(stateManager, globalEventStore);
+    startScanners(stateManager, globalEventStore, () => {
+      void sidebar.refresh();
+    });
     sidebar.setEventStore(globalEventStore);
     const folder = stateManager.getPrimaryFolder();
     sidebar.setWorkspaceFolder(folder);
