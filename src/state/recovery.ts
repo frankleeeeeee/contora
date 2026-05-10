@@ -1,9 +1,10 @@
 import * as vscode from 'vscode';
+import { CONTORA_CONFIG_SECTION } from '../constants';
 import { StateManager } from './stateManager';
 import { ProjectState } from '../types/state';
 
 function maxRestoreEditors(): number {
-  const n = vscode.workspace.getConfiguration('contextRecall').get<number>('maxRestoreEditors');
+  const n = vscode.workspace.getConfiguration(CONTORA_CONFIG_SECTION).get<number>('maxRestoreEditors');
   return typeof n === 'number' && n >= 0 ? Math.min(30, n) : 8;
 }
 
@@ -24,7 +25,7 @@ async function tryOpenRelativePath(folder: vscode.WorkspaceFolder, relativePath:
 }
 
 /**
- * 根据 state 打开最近文件；任务与笔记由侧栏展示，此处只负责编辑器恢复。
+ * Open recent files from `state`; task/notes are shown in the sidebar — this module only restores editors.
  */
 export async function restoreEditorsFromState(folder: vscode.WorkspaceFolder, state: ProjectState): Promise<void> {
   const max = maxRestoreEditors();
@@ -49,7 +50,7 @@ export async function restoreEditorsFromState(folder: vscode.WorkspaceFolder, st
 }
 
 export async function autoRestoreIfEnabled(manager: StateManager, folder: vscode.WorkspaceFolder): Promise<void> {
-  const enabled = vscode.workspace.getConfiguration('contextRecall').get<boolean>('autoRestoreOnOpen');
+  const enabled = vscode.workspace.getConfiguration(CONTORA_CONFIG_SECTION).get<boolean>('autoRestoreOnOpen');
   if (enabled === false) {
     return;
   }

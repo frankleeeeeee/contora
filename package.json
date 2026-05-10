@@ -1,8 +1,8 @@
 {
-  "name": "context-recall-dev",
-  "displayName": "ContextRecall",
-  "description": "ContextRecall: persist workspace session state (task, notes, editors, Git paths) and export AI-ready summaries — local .context-recall/state.json.",
-  "version": "0.2.0",
+  "name": "contora",
+  "displayName": "Contora",
+  "description": "Contora: local workspace memory (task, notes, editors, Git), event JSONL, checkpoints, heuristic intent/ranking, ignore rules, token budget — export AI-ready context to clipboard (markdown, JSON, MCP, etc.).",
+  "version": "0.4.1",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -12,7 +12,7 @@
   "bugs": {
     "url": "https://github.com/frankleeeeeee/context-recall/issues"
   },
-  "publisher": "frankleeeeeee-dev",
+  "publisher": "franklee-dev",
   "icon": "icon.png",
   "engines": {
     "vscode": "^1.85.0"
@@ -32,63 +32,144 @@
   ],
   "activationEvents": [
     "onStartupFinished",
-    "onView:contextRecall.sidebar"
+    "onView:contora.sidebar"
   ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "contextRecall.exportAIContext",
-        "title": "ContextRecall: Export AI context"
+        "command": "contora.exportAIContext",
+        "title": "Contora: Export AI context"
       },
       {
-        "command": "contextRecall.saveStateNow",
-        "title": "ContextRecall: Save session state now"
+        "command": "contora.saveStateNow",
+        "title": "Contora: Save session state now"
       },
       {
-        "command": "contextRecall.restoreSession",
-        "title": "ContextRecall: Restore editors from snapshot"
+        "command": "contora.restoreSession",
+        "title": "Contora: Restore editors from snapshot"
+      },
+      {
+        "command": "contora.saveSnapshot",
+        "title": "Contora: Save workspace snapshot (JSON)"
+      },
+      {
+        "command": "contora.restoreFromSnapshot",
+        "title": "Contora: Restore from snapshot…"
       }
     ],
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "contextRecall",
-          "title": "ContextRecall",
+          "id": "contora",
+          "title": "Contora",
           "icon": "icon.png"
         }
       ]
     },
     "views": {
-      "contextRecall": [
+      "contora": [
         {
           "type": "webview",
-          "id": "contextRecall.sidebar",
-          "name": "Session & Context"
+          "id": "contora.sidebar",
+          "name": "Contora"
         }
       ]
     },
     "configuration": {
-      "title": "ContextRecall",
+      "title": "Contora",
       "properties": {
-        "contextRecall.autoRestoreOnOpen": {
+        "contora.autoRestoreOnOpen": {
           "type": "boolean",
           "default": true,
-          "description": "When opening the workspace, restore editors from .context-recall/state.json."
+          "description": "When opening the workspace, restore editors from .contora/state.json (legacy .context-recall/state.json is read if present)."
         },
-        "contextRecall.maxRestoreEditors": {
+        "contora.maxRestoreEditors": {
           "type": "number",
           "default": 8,
           "minimum": 0,
           "maximum": 30,
           "description": "Maximum editors to open on auto-restore (0 = open none)."
         },
-        "contextRecall.workingSetMaxFiles": {
+        "contora.workingSetMaxFiles": {
           "type": "number",
           "default": 40,
           "minimum": 5,
           "maximum": 200,
           "description": "Max paths in working set (recentFiles); counts focus/save only."
+        },
+        "contora.defaultAIMode": {
+          "type": "string",
+          "enum": ["debug", "feature", "refactor", "review"],
+          "default": "feature",
+          "description": "Default AI mode for structured export (# MODE / instruction)."
+        },
+        "contora.exportFormat": {
+          "type": "string",
+          "enum": ["markdown", "cursor", "json", "claude", "openai", "mcp"],
+          "default": "markdown",
+          "description": "Export: markdown / cursor fences / JSON schema v2 / Claude framing / OpenAI messages JSON / MCP getContext envelope."
+        },
+        "contora.persistEventLog": {
+          "type": "boolean",
+          "default": true,
+          "description": "Append each workspace event to .contora/events/<sessionId>.jsonl (immutable log)."
+        },
+        "contora.maxPriorityFiles": {
+          "type": "number",
+          "default": 12,
+          "minimum": 1,
+          "maximum": 40,
+          "description": "Max ranked paths in # PRIORITY FILES / payload (capped by mode strategy)."
+        },
+        "contora.maxEventBuffer": {
+          "type": "number",
+          "default": 200,
+          "minimum": 20,
+          "maximum": 5000,
+          "description": "Max session events kept in memory (ring buffer)."
+        },
+        "contora.eventsInPrompt": {
+          "type": "number",
+          "default": 50,
+          "minimum": 0,
+          "maximum": 200,
+          "description": "How many recent events to append under # RECENT EVENTS in export."
+        },
+        "contora.exportTokenBudget": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 200000,
+          "description": "Approx max tokens for export (0 = unlimited). Trims markdown/cursor/claude/openai text or shrinks JSON/MCP payload."
+        },
+        "contora.useDefaultIgnoreRules": {
+          "type": "boolean",
+          "default": true,
+          "description": "Exclude noisy paths (node_modules, venv, .git, dist, …) from ranking, summary, export lists."
+        },
+        "contora.extraIgnoreSubstrings": {
+          "type": "array",
+          "default": [],
+          "items": { "type": "string" },
+          "description": "Extra path substrings to exclude (case-insensitive substring match on workspace-relative paths)."
+        },
+        "contora.cooccurrenceWindow": {
+          "type": "number",
+          "default": 10,
+          "minimum": 2,
+          "maximum": 24,
+          "description": "Event window size for CONTEXT GRAPH co-occurrence edges."
+        },
+        "contora.mergeDiskEventLog": {
+          "type": "boolean",
+          "default": true,
+          "description": "On workspace sync, merge JSONL events from disk into the in-memory ring buffer (same sessionId)."
+        },
+        "contora.writeLatestMemoryOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "After Save session state, also write .contora/memory/latest-memory.json (ranked memory mirror)."
         }
       }
     }

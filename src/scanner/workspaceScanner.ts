@@ -1,9 +1,11 @@
 import * as vscode from 'vscode';
+import { CONTORA_CONFIG_SECTION } from '../constants';
+import type { EventStore } from '../core/engine/eventStore';
 import { StateManager } from '../state/stateManager';
-import { scanGitModified } from './gitScanner';
+import { scanGitState } from './gitScanner';
 
 function workingSetCap(): number {
-  const n = vscode.workspace.getConfiguration('contextRecall').get<number>('workingSetMaxFiles');
+  const n = vscode.workspace.getConfiguration(CONTORA_CONFIG_SECTION).get<number>('workingSetMaxFiles');
   return typeof n === 'number' && n > 0 ? Math.min(200, n) : 40;
 }
 
@@ -53,24 +55,19 @@ function collectOpenTabRelativePaths(folder: vscode.WorkspaceFolder): string[] {
 export class WorkspaceScanner {
   private disposables: vscode.Disposable[] = [];
   private gitTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastGitSig = '';
 
   constructor(
     private readonly folder: vscode.WorkspaceFolder,
     private readonly state: StateManager,
+    private readonly events?: EventStore,
   ) {}
 
-  /** 立即把当前标签页、Working Set、Git 状态写入磁盘（供命令调用）。 */
   flushNow(): Thenable<void> {
-    return this.persist(undefined);
+    return this.persist(undefined, undefined);
   }
 
-  /**
-   * 同步磁盘状态。
-   * - `openFiles`：当前所有打开的标签。
-   * - `recentFiles`（工作集）：仅在切换活动编辑器或保存时追加，不把「所有已打开标签」一次性合并进来，
-   *   避免刚装插件就出现一大串用户并未在本会话操作过的路径。
-   */
-  private async persist(touchRelative?: string): Promise<void> {
+  private async persist(touchRelative?: string, kind?: 'focus' | 'save'): Promise<void> {
     const folder = this.folder;
     const cap = workingSetCap();
     const openFiles = collectOpenTabRelativePaths(folder);
@@ -78,8 +75,32 @@ export class WorkspaceScanner {
     if (touchRelative) {
       recent = pushFrontUnique(recent, touchRelative, cap);
     }
-    const gitModified = await scanGitModified(folder.uri.fsPath);
-    await this.state.update(folder, { openFiles, recentFiles: recent, gitModified });
+
+    if (touchRelative && kind === 'focus') {
+      this.events?.add({ type: 'file_focus', file: touchRelative, timestamp: Date.now() });
+    }
+    if (touchRelative && kind === 'save') {
+      this.events?.add({ type: 'file_save', file: touchRelative, timestamp: Date.now() });
+    }
+
+    const gs = await scanGitState(folder.uri.fsPath);
+    const sig = JSON.stringify(gs);
+    if (sig !== this.lastGitSig) {
+      this.lastGitSig = sig;
+      this.events?.add({
+        type: 'git_change',
+        modified: gs.working,
+        staged: gs.staged,
+        timestamp: Date.now(),
+      });
+    }
+
+    await this.state.update(folder, {
+      openFiles,
+      recentFiles: recent,
+      gitStaged: gs.staged,
+      gitWorking: gs.working,
+    });
   }
 
   start(): void {
@@ -92,7 +113,7 @@ export class WorkspaceScanner {
         if (!rel) {
           return;
         }
-        void this.persist(rel);
+        void this.persist(rel, 'focus');
       }),
     );
 
@@ -102,7 +123,7 @@ export class WorkspaceScanner {
         if (!rel) {
           return;
         }
-        void this.persist(rel);
+        void this.persist(rel, 'save');
       }),
     );
 

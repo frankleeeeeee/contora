@@ -1,19 +1,42 @@
 {
   "currentTask": "",
   "openFiles": [
-    "README.md",
-    "package.json"
+    "package.json",
+    "插件2.0.md",
+    "插件2.1.md",
+    "README.md"
   ],
   "recentFiles": [
-    "README.md",
     "package.json",
+    "插件2.0.md",
+    "插件2.1.md",
+    "README.md",
     "project-recall-0.1.0.vsix",
     "LICENSE",
     "project-recall-0.1.3.vsix"
   ],
   "gitModified": [
-    ".project-recall/state.json"
+    ".project-recall/state.json",
+    "README.md",
+    "package.json",
+    "src/extension.ts",
+    "src/scanner/gitScanner.ts",
+    "src/scanner/workspaceScanner.ts",
+    "src/state/stateManager.ts",
+    "src/types/state.ts",
+    "src/ui/sidebarProvider.ts",
+    "docs/UPGRADE_PLAN_2.x.md",
+    "src/core/adapters/exportAdapters.ts",
+    "src/core/context/contextBuilder.ts",
+    "src/core/context/modeEngine.ts",
+    "src/core/engine/eventStore.ts",
+    "src/core/engine/memoryBuilder.ts",
+    "src/core/index.ts",
+    "src/core/models/events.ts",
+    "src/core/models/workspaceMemory.ts",
+    "插件2.0.md",
+    "插件2.1.md"
   ],
   "notes": "",
-  "lastUpdated": 1778380958158
+  "lastUpdated": 1778384378324
 }

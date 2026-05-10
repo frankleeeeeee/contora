@@ -1,17 +1,16 @@
 /**
- * 持久化到 `.context-recall/state.json` 的项目会话状态。
- * 与文档中的 ProjectState 对齐，并扩展 openFiles / gitModified 以覆盖功能 1、2。
+ * Persisted to `.contora/state.json` (legacy: `.context-recall/state.json` is read on first load).
  */
 export interface ProjectState {
-  /** 当前任务描述（用户可编辑） */
+  /** Stable session id for Context Engine memory (generated once per workspace). */
+  sessionId?: string;
   currentTask: string;
-  /** 当前在编辑器标签中打开的工作区相对路径 */
   openFiles: string[];
-  /** Working Set：最近活跃 / 编辑过的文件（工作区相对路径，新在前） */
   recentFiles: string[];
-  /** Git 工作区变更文件（相对路径），由 simple-git 真实读取 */
-  gitModified: string[];
-  /** 笔记 */
+  /** Paths with staged (index) changes */
+  gitStaged: string[];
+  /** Working-tree paths (modified / untracked / …), non-index */
+  gitWorking: string[];
   notes: string;
   lastUpdated: number;
 }
@@ -21,7 +20,8 @@ export function defaultProjectState(): ProjectState {
     currentTask: '',
     openFiles: [],
     recentFiles: [],
-    gitModified: [],
+    gitStaged: [],
+    gitWorking: [],
     notes: '',
     lastUpdated: 0,
   };

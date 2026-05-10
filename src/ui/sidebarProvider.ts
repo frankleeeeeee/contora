@@ -1,23 +1,36 @@
 import * as vscode from 'vscode';
+import type { EventStore } from '../core/engine/eventStore';
 import { StateManager } from '../state/stateManager';
-import { ProjectState } from '../types/state';
 
 type WebviewToExt =
   | { type: 'ready' }
+  | { type: 'exportAIContext' }
+  | { type: 'saveStateNow' }
+  | { type: 'restoreSession' }
+  | { type: 'saveSnapshot' }
+  | { type: 'restoreFromSnapshot' }
   | { type: 'updateTask'; value: string }
   | { type: 'updateNotes'; value: string }
   | { type: 'openFile'; relativePath: string };
 
-export class ContextRecallSidebarProvider implements vscode.WebviewViewProvider {
-  public static readonly viewId = 'contextRecall.sidebar';
+export class ContoraSidebarProvider implements vscode.WebviewViewProvider {
+  public static readonly viewId = 'contora.sidebar';
 
   private view?: vscode.WebviewView;
   private folder: vscode.WorkspaceFolder | undefined;
+  private events?: EventStore;
 
   constructor(
     private readonly ctx: vscode.ExtensionContext,
     private readonly stateManager: StateManager,
-  ) {}
+    events?: EventStore,
+  ) {
+    this.events = events;
+  }
+
+  setEventStore(store: EventStore | undefined): void {
+    this.events = store;
+  }
 
   setWorkspaceFolder(folder: vscode.WorkspaceFolder | undefined): void {
     this.folder = folder;
@@ -37,17 +50,39 @@ export class ContextRecallSidebarProvider implements vscode.WebviewViewProvider 
         await this.pushStateToWebview();
         return;
       }
+      if (msg.type === 'exportAIContext') {
+        await vscode.commands.executeCommand('contora.exportAIContext');
+        return;
+      }
+      if (msg.type === 'saveStateNow') {
+        await vscode.commands.executeCommand('contora.saveStateNow');
+        return;
+      }
+      if (msg.type === 'restoreSession') {
+        await vscode.commands.executeCommand('contora.restoreSession');
+        return;
+      }
+      if (msg.type === 'saveSnapshot') {
+        await vscode.commands.executeCommand('contora.saveSnapshot');
+        return;
+      }
+      if (msg.type === 'restoreFromSnapshot') {
+        await vscode.commands.executeCommand('contora.restoreFromSnapshot');
+        return;
+      }
       const folder = this.folder ?? this.stateManager.getPrimaryFolder();
       if (!folder) {
-        vscode.window.showWarningMessage('ContextRecall：请先打开含文件夹的工作区。');
+        vscode.window.showWarningMessage('Contora: Open a folder workspace first.');
         return;
       }
       if (msg.type === 'updateTask') {
         await this.stateManager.update(folder, { currentTask: msg.value });
+        this.events?.add({ type: 'task_update', task: msg.value, timestamp: Date.now() });
         return;
       }
       if (msg.type === 'updateNotes') {
         await this.stateManager.update(folder, { notes: msg.value });
+        this.events?.add({ type: 'note_update', note: msg.value, timestamp: Date.now() });
         return;
       }
       if (msg.type === 'openFile') {
@@ -83,10 +118,6 @@ export class ContextRecallSidebarProvider implements vscode.WebviewViewProvider 
     this.view.webview.postMessage({ type: 'state', state });
   }
 
-  /**
-   * Webview 必须允许 `webview.cspSource`，否则打包后 VS Code 注入的通信脚本会被 CSP 拦截，侧栏表现为空白/无响应。
-   * @see https://code.visualstudio.com/api/extension-guides/webview#security
-   */
   private getHtml(webview: vscode.Webview): string {
     const nonce = String(Math.random()).slice(2);
     const cspSource = webview.cspSource;
@@ -96,12 +127,12 @@ export class ContextRecallSidebarProvider implements vscode.WebviewViewProvider 
       `script-src 'nonce-${nonce}' ${cspSource}`,
     ].join('; ');
     return `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="${csp}" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ContextRecall</title>
+  <title>Contora</title>
   <style>
     body { font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); color: var(--vscode-foreground); padding: 8px; }
     label { display: block; margin-top: 10px; font-weight: 600; }
@@ -112,32 +143,67 @@ export class ContextRecallSidebarProvider implements vscode.WebviewViewProvider 
     li:hover { text-decoration: underline; }
     .muted { opacity: 0.75; font-size: 0.9em; margin-top: 8px; }
     .section { margin-top: 12px; }
+    code { font-size: 0.92em; }
+    li.toggle-more { list-style: none; margin-left: -18px; margin-top: 6px; font-weight: 600; }
+    li.toggle-more:hover { text-decoration: underline; }
+    .actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 4px; }
+    .actions button {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 6px 8px;
+      font-size: var(--vscode-font-size);
+      font-family: var(--vscode-font-family);
+      color: var(--vscode-button-foreground);
+      background: var(--vscode-button-background);
+      border: 1px solid var(--vscode-button-border, transparent);
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .actions button:hover { background: var(--vscode-button-hoverBackground); }
+    .actions button.secondary {
+      color: var(--vscode-button-secondaryForeground);
+      background: var(--vscode-button-secondaryBackground);
+    }
+    .actions button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
   </style>
 </head>
 <body>
-  <div class="muted">当前工作区状态（写入 <code>.context-recall/state.json</code>）。「工作集」记录的是你<strong>切换到过或保存过</strong>的文件，不是「磁盘上刚改过」才算。</div>
-  <label for="task">当前任务</label>
-  <textarea id="task" rows="3" placeholder="例如：重构支付重试逻辑…"></textarea>
+  <div class="muted">State is written to <code>.contora/state.json</code> · Context engine (events + structured export)</div>
+  <div class="actions">
+    <button type="button" id="btnExport" title="Copy AI context to clipboard (same as Command Palette: Export AI context)">Copy AI context</button>
+    <button type="button" class="secondary" id="btnSave" title="Flush state to disk now">Save now</button>
+    <button type="button" class="secondary" id="btnRestore" title="Re-open editors from last saved state">Restore editors</button>
+    <button type="button" class="secondary" id="btnSnap" title="Checkpoint: state + event tail → .contora/snapshots/checkpoint-*.json">Save snapshot</button>
+    <button type="button" class="secondary" id="btnRestoreSnap" title="Pick a snapshot; restore state and merge events">Restore snapshot</button>
+  </div>
+  <label for="task">Current task</label>
+  <textarea id="task" rows="3" placeholder="e.g. Refactor payment retry…"></textarea>
 
   <div class="section">
-    <label>工作集（最近切换 / 保存）</label>
+    <label>Working set (recent focus / save)</label>
     <ul id="recent"></ul>
   </div>
 
   <div class="section">
-    <label>Git 变更（工作区）</label>
-    <ul id="git"></ul>
+    <label>Git · staged</label>
+    <ul id="gitStaged"></ul>
   </div>
 
-  <label for="notes">笔记</label>
-  <textarea id="notes" rows="5" placeholder="给下次会话或 AI 的备忘…"></textarea>
+  <div class="section">
+    <label>Git · working tree</label>
+    <ul id="gitWorking"></ul>
+  </div>
+
+  <label for="notes">Notes</label>
+  <textarea id="notes" rows="5" placeholder="Notes for your next session or for AI…"></textarea>
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const taskEl = document.getElementById('task');
     const notesEl = document.getElementById('notes');
     const recentEl = document.getElementById('recent');
-    const gitEl = document.getElementById('git');
+    const gitStagedEl = document.getElementById('gitStaged');
+    const gitWorkingEl = document.getElementById('gitWorking');
 
     let debounce;
 
@@ -149,23 +215,54 @@ export class ContextRecallSidebarProvider implements vscode.WebviewViewProvider 
     taskEl.addEventListener('input', () => debouncePost('updateTask', taskEl.value));
     notesEl.addEventListener('input', () => debouncePost('updateNotes', notesEl.value));
 
-    function renderList(el, items, msgType) {
-      el.innerHTML = '';
+    document.getElementById('btnExport').addEventListener('click', () => vscode.postMessage({ type: 'exportAIContext' }));
+    document.getElementById('btnSave').addEventListener('click', () => vscode.postMessage({ type: 'saveStateNow' }));
+    document.getElementById('btnRestore').addEventListener('click', () => vscode.postMessage({ type: 'restoreSession' }));
+    document.getElementById('btnSnap').addEventListener('click', () => vscode.postMessage({ type: 'saveSnapshot' }));
+    document.getElementById('btnRestoreSnap').addEventListener('click', () => vscode.postMessage({ type: 'restoreFromSnapshot' }));
+
+    const LIST_CAP = 5;
+    const expandState = { recent: false, staged: false, working: false };
+    let lastState = null;
+
+    function renderCollapsibleList(ul, items, msgType, sectionKey) {
+      ul.innerHTML = '';
       if (!items || items.length === 0) {
         const li = document.createElement('li');
-        li.textContent = '（无）';
+        li.textContent = '(none)';
         li.style.cursor = 'default';
         li.style.color = 'var(--vscode-disabledForeground)';
         li.style.textDecoration = 'none';
-        el.appendChild(li);
+        ul.appendChild(li);
         return;
       }
-      for (const p of items) {
+      const expanded = expandState[sectionKey];
+      const visible = expanded ? items : items.slice(0, LIST_CAP);
+      for (const p of visible) {
         const li = document.createElement('li');
         li.textContent = p;
         li.addEventListener('click', () => vscode.postMessage({ type: msgType, relativePath: p }));
-        el.appendChild(li);
+        ul.appendChild(li);
       }
+      if (items.length > LIST_CAP) {
+        const toggle = document.createElement('li');
+        toggle.className = 'toggle-more';
+        toggle.textContent = expanded ? 'Show less' : 'More';
+        toggle.addEventListener('click', (e) => {
+          e.preventDefault();
+          expandState[sectionKey] = !expandState[sectionKey];
+          if (lastState) {
+            paintLists(lastState);
+          }
+        });
+        ul.appendChild(toggle);
+      }
+    }
+
+    function paintLists(s) {
+      renderCollapsibleList(recentEl, s.recentFiles || [], 'openFile', 'recent');
+      renderCollapsibleList(gitStagedEl, s.gitStaged || [], 'openFile', 'staged');
+      renderCollapsibleList(gitWorkingEl, s.gitWorking || [], 'openFile', 'working');
     }
 
     window.addEventListener('message', (event) => {
@@ -173,16 +270,19 @@ export class ContextRecallSidebarProvider implements vscode.WebviewViewProvider 
       if (!msg || msg.type !== 'state') return;
       const s = msg.state;
       if (!s) {
+        lastState = null;
+        expandState.recent = false;
+        expandState.staged = false;
+        expandState.working = false;
         taskEl.value = '';
         notesEl.value = '';
-        renderList(recentEl, [], 'openFile');
-        renderList(gitEl, [], 'openFile');
+        paintLists({ recentFiles: [], gitStaged: [], gitWorking: [] });
         return;
       }
+      lastState = s;
       taskEl.value = s.currentTask || '';
       notesEl.value = s.notes || '';
-      renderList(recentEl, s.recentFiles || [], 'openFile');
-      renderList(gitEl, s.gitModified || [], 'openFile');
+      paintLists(s);
     });
 
     vscode.postMessage({ type: 'ready' });
@@ -190,41 +290,4 @@ export class ContextRecallSidebarProvider implements vscode.WebviewViewProvider 
 </body>
 </html>`;
   }
-}
-
-export function formatAIExport(state: ProjectState): string {
-  const lines: string[] = [];
-  lines.push('Current Task:');
-  lines.push(state.currentTask?.trim() ? state.currentTask.trim() : '（未填写）');
-  lines.push('');
-  lines.push('Open Files (tabs):');
-  if (state.openFiles?.length) {
-    for (const f of state.openFiles) {
-      lines.push(`- ${f}`);
-    }
-  } else {
-    lines.push('（无）');
-  }
-  lines.push('');
-  lines.push('Recent Files (working set):');
-  if (state.recentFiles?.length) {
-    for (const f of state.recentFiles) {
-      lines.push(`- ${f}`);
-    }
-  } else {
-    lines.push('（无）');
-  }
-  lines.push('');
-  lines.push('Git modified / unstaged:');
-  if (state.gitModified?.length) {
-    for (const f of state.gitModified) {
-      lines.push(`- ${f}`);
-    }
-  } else {
-    lines.push('（无或未在 Git 仓库中）');
-  }
-  lines.push('');
-  lines.push('Important Notes:');
-  lines.push(state.notes?.trim() ? state.notes.trim() : '（无）');
-  return lines.join('\n');
 }

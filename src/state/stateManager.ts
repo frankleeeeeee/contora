@@ -1,22 +1,40 @@
 import * as vscode from 'vscode';
+import { CONTORA_DATA_DIR, CONTORA_LEGACY_DATA_DIR } from '../constants';
 import { ProjectState, defaultProjectState } from '../types/state';
 
-const REL_DIR = '.context-recall';
 const STATE_FILE = 'state.json';
 
-function statePathForFolder(folder: vscode.WorkspaceFolder): vscode.Uri {
-  return vscode.Uri.joinPath(folder.uri, REL_DIR, STATE_FILE);
+function statePath(folder: vscode.WorkspaceFolder, relDir: string): vscode.Uri {
+  return vscode.Uri.joinPath(folder.uri, relDir, STATE_FILE);
 }
 
 function normalizeMerge(base: ProjectState, patch: Partial<ProjectState>): ProjectState {
   return {
+    sessionId: patch.sessionId ?? base.sessionId,
     currentTask: patch.currentTask ?? base.currentTask,
     openFiles: patch.openFiles ?? base.openFiles,
     recentFiles: patch.recentFiles ?? base.recentFiles,
-    gitModified: patch.gitModified ?? base.gitModified,
+    gitStaged: patch.gitStaged ?? base.gitStaged,
+    gitWorking: patch.gitWorking ?? base.gitWorking,
     notes: patch.notes ?? base.notes,
     lastUpdated: Date.now(),
   };
+}
+
+function migrateLegacy(o: Record<string, unknown>, merged: ProjectState): ProjectState {
+  const legacyModified = o.gitModified;
+  if (
+    Array.isArray(legacyModified) &&
+    legacyModified.every((x): x is string => typeof x === 'string') &&
+    merged.gitWorking.length === 0 &&
+    merged.gitStaged.length === 0
+  ) {
+    return {
+      ...merged,
+      gitWorking: legacyModified.map((p) => p.replace(/\\/g, '/')),
+    };
+  }
+  return merged;
 }
 
 async function readJson(uri: vscode.Uri): Promise<ProjectState | undefined> {
@@ -28,19 +46,38 @@ async function readJson(uri: vscode.Uri): Promise<ProjectState | undefined> {
       return undefined;
     }
     const o = parsed as Record<string, unknown>;
-    const merged: ProjectState = {
+    let merged: ProjectState = {
       ...defaultProjectState(),
+      sessionId: typeof o.sessionId === 'string' ? o.sessionId : undefined,
       currentTask: typeof o.currentTask === 'string' ? o.currentTask : '',
       notes: typeof o.notes === 'string' ? o.notes : '',
       lastUpdated: typeof o.lastUpdated === 'number' ? o.lastUpdated : 0,
       openFiles: Array.isArray(o.openFiles) ? o.openFiles.filter((x): x is string => typeof x === 'string') : [],
       recentFiles: Array.isArray(o.recentFiles) ? o.recentFiles.filter((x): x is string => typeof x === 'string') : [],
-      gitModified: Array.isArray(o.gitModified) ? o.gitModified.filter((x): x is string => typeof x === 'string') : [],
+      gitStaged: Array.isArray(o.gitStaged) ? o.gitStaged.filter((x): x is string => typeof x === 'string') : [],
+      gitWorking: Array.isArray(o.gitWorking) ? o.gitWorking.filter((x): x is string => typeof x === 'string') : [],
     };
+    merged = migrateLegacy(o, merged);
     return merged;
   } catch {
     return undefined;
   }
+}
+
+async function loadStateFromDisk(folder: vscode.WorkspaceFolder): Promise<ProjectState | undefined> {
+  const primary = await readJson(statePath(folder, CONTORA_DATA_DIR));
+  if (primary !== undefined) {
+    return primary;
+  }
+  return readJson(statePath(folder, CONTORA_LEGACY_DATA_DIR));
+}
+
+export function newSessionId(): string {
+  const rnd =
+    typeof globalThis.crypto !== 'undefined' && typeof globalThis.crypto.randomUUID === 'function'
+      ? globalThis.crypto.randomUUID().slice(0, 8)
+      : Math.random().toString(36).slice(2, 10);
+  return `sess_${Date.now().toString(36)}_${rnd}`;
 }
 
 export class StateManager {
@@ -57,8 +94,13 @@ export class StateManager {
 
   async load(folder: vscode.WorkspaceFolder): Promise<ProjectState> {
     const k = this.key(folder);
-    const disk = await readJson(statePathForFolder(folder));
-    const state = disk ?? defaultProjectState();
+    let state = (await loadStateFromDisk(folder)) ?? defaultProjectState();
+    if (!state.sessionId) {
+      state = { ...state, sessionId: newSessionId() };
+      this.cache.set(k, state);
+      await this.flush(folder, state);
+      return state;
+    }
     this.cache.set(k, state);
     return state;
   }
@@ -82,8 +124,8 @@ export class StateManager {
   }
 
   private async flush(folder: vscode.WorkspaceFolder, state: ProjectState): Promise<void> {
-    const dir = vscode.Uri.joinPath(folder.uri, REL_DIR);
-    const file = statePathForFolder(folder);
+    const dir = vscode.Uri.joinPath(folder.uri, CONTORA_DATA_DIR);
+    const file = statePath(folder, CONTORA_DATA_DIR);
     await vscode.workspace.fs.createDirectory(dir);
     const body = JSON.stringify(state, null, 2);
     await vscode.workspace.fs.writeFile(file, Buffer.from(body, 'utf8'));

@@ -1,53 +1,66 @@
 import simpleGit, { SimpleGit } from 'simple-git';
-import * as vscode from 'vscode';
+
+export interface GitScanResult {
+  staged: string[];
+  working: string[];
+}
+
+function norm(p: string): string {
+  return p.replace(/\\/g, '/');
+}
 
 /**
- * 使用 simple-git 读取真实 Git 状态，提取已修改 / 未跟踪等工作区变更文件的相对路径。
+ * Split Git status into staged vs working tree (2.x WorkspaceMemory.gitState).
  */
-export async function scanGitModified(workspaceRoot: string): Promise<string[]> {
+export async function scanGitState(workspaceRoot: string): Promise<GitScanResult> {
   let git: SimpleGit;
   try {
     git = simpleGit(workspaceRoot);
     const isRepo = await git.checkIsRepo();
     if (!isRepo) {
-      return [];
+      return { staged: [], working: [] };
     }
   } catch {
-    return [];
+    return { staged: [], working: [] };
   }
 
   try {
     const status = await git.status();
-    const set = new Set<string>();
+    const staged = new Set<string>();
+    const working = new Set<string>();
+
     for (const p of status.staged) {
-      set.add(p.replace(/\\/g, '/'));
+      staged.add(norm(p));
     }
     for (const p of status.modified) {
-      set.add(p.replace(/\\/g, '/'));
+      working.add(norm(p));
     }
     for (const p of status.not_added) {
-      set.add(p.replace(/\\/g, '/'));
+      working.add(norm(p));
     }
     for (const p of status.created) {
-      set.add(p.replace(/\\/g, '/'));
+      working.add(norm(p));
     }
     for (const p of status.deleted) {
-      set.add(p.replace(/\\/g, '/'));
+      working.add(norm(p));
     }
     for (const p of status.renamed) {
       if (p.to) {
-        set.add(p.to.replace(/\\/g, '/'));
+        working.add(norm(p.to));
       }
     }
     for (const p of status.conflicted) {
-      set.add(p.replace(/\\/g, '/'));
+      working.add(norm(p));
     }
-    return [...set];
+
+    return { staged: [...staged], working: [...working] };
   } catch {
-    return [];
+    return { staged: [], working: [] };
   }
 }
 
-export function getWorkspaceRootPath(folder: vscode.WorkspaceFolder): string {
-  return folder.uri.fsPath;
+/** Combined unique paths (sidebar flat list / legacy). */
+export async function scanGitMerged(workspaceRoot: string): Promise<string[]> {
+  const { staged, working } = await scanGitState(workspaceRoot);
+  return [...new Set([...staged, ...working])];
 }
