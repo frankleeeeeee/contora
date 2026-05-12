@@ -1,3 +1,4 @@
+import { rankingScoreMultiplier } from '../../runtime';
 import type { ProjectState } from '../../types/state';
 import type { WorkspaceEvent } from '../models/events';
 import type { ModeStrategy } from '../modes/modeStrategy';
@@ -69,13 +70,13 @@ export function scorePath(
 ): number {
   const r = getPathScoreRaw(file, state, events);
   const w = strategy.weights;
-  return (
+  const base =
     w.gitStaged * r.gitStaged +
     w.gitWorking * r.gitWorking +
     w.openTab * r.openTab +
     w.workingSetRecency * r.workingSetRecency +
     w.focus * r.focusCount +
     w.save * r.saveCount +
-    w.taskKeyword * r.taskKeyword
-  );
+    w.taskKeyword * r.taskKeyword;
+  return base * rankingScoreMultiplier(file);
 }

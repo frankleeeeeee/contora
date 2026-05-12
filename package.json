@@ -1,16 +1,16 @@
 {
   "name": "contora",
   "displayName": "Contora",
-  "description": "Contora: local workspace memory (task, notes, editors, Git), event JSONL, checkpoints, heuristic intent/ranking, ignore rules, token budget — export AI-ready context to clipboard (markdown, JSON, MCP, etc.).",
-  "version": "0.4.2",
+  "description": "Contora: local workspace memory (task, notes, editors, Git), event JSONL, heuristic intent/ranking, ignore rules, token budget, optional BYOK (OpenAI / Claude / Gemini / DeepSeek) — export AI-ready context to clipboard (markdown, JSON, etc.).",
+  "version": "0.5.1",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/frankleeeeeee/context-recall.git"
+    "url": "https://github.com/frankleeeeeee/contora.git"
   },
-  "homepage": "https://github.com/frankleeeeeee/context-recall#readme",
+  "homepage": "https://github.com/frankleeeeeee/contora#readme",
   "bugs": {
-    "url": "https://github.com/frankleeeeeee/context-recall/issues"
+    "url": "https://github.com/frankleeeeeee/contora/issues"
   },
   "publisher": "franklee-dev",
   "icon": "icon.png",
@@ -32,7 +32,11 @@
   ],
   "activationEvents": [
     "onStartupFinished",
-    "onView:contora.sidebar"
+    "onView:contora.sidebar",
+    "onCommand:contora.configureApiKey",
+    "onCommand:contora.generateSemanticSummary",
+    "onCommand:contora.analyzeWorkspaceIntent",
+    "onCommand:contora.compressContextPreview"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -47,15 +51,23 @@
       },
       {
         "command": "contora.restoreSession",
-        "title": "Contora: Restore editors from snapshot"
+        "title": "Contora: Restore editors from saved state"
       },
       {
-        "command": "contora.saveSnapshot",
-        "title": "Contora: Save workspace snapshot (JSON)"
+        "command": "contora.configureApiKey",
+        "title": "Contora: Configure API key… (BYOK)"
       },
       {
-        "command": "contora.restoreFromSnapshot",
-        "title": "Contora: Restore from snapshot…"
+        "command": "contora.generateSemanticSummary",
+        "title": "Contora: Generate AI semantic summary"
+      },
+      {
+        "command": "contora.analyzeWorkspaceIntent",
+        "title": "Contora: Analyze workspace intent (AI)"
+      },
+      {
+        "command": "contora.compressContextPreview",
+        "title": "Contora: Compress context preview (AI)"
       }
     ],
     "viewsContainers": {
@@ -79,17 +91,12 @@
     "configuration": {
       "title": "Contora",
       "properties": {
-        "contora.autoRestoreOnOpen": {
-          "type": "boolean",
-          "default": true,
-          "description": "When opening the workspace, restore editors from .contora/state.json (legacy .context-recall/state.json is read if present)."
-        },
         "contora.maxRestoreEditors": {
           "type": "number",
           "default": 8,
           "minimum": 0,
           "maximum": 30,
-          "description": "Maximum editors to open on auto-restore (0 = open none)."
+          "description": "Maximum editors to open when using \"Restore editors from saved state\" (0 = none)."
         },
         "contora.workingSetMaxFiles": {
           "type": "number",
@@ -106,9 +113,9 @@
         },
         "contora.exportFormat": {
           "type": "string",
-          "enum": ["markdown", "cursor", "json", "claude", "openai", "mcp"],
+          "enum": ["markdown", "cursor", "json", "claude", "openai"],
           "default": "markdown",
-          "description": "Export: markdown / cursor fences / JSON schema v2 / Claude framing / OpenAI messages JSON / MCP getContext envelope."
+          "description": "Export: markdown / cursor fences / JSON (schema v2 Lite) / Claude framing / OpenAI messages JSON."
         },
         "contora.persistEventLog": {
           "type": "boolean",
@@ -141,7 +148,7 @@
           "default": 0,
           "minimum": 0,
           "maximum": 200000,
-          "description": "Approx max tokens for export (0 = unlimited). Trims markdown/cursor/claude/openai text or shrinks JSON/MCP payload."
+          "description": "Approx max tokens for export (0 = unlimited). Trims text exports or shrinks JSON payload."
         },
         "contora.useDefaultIgnoreRules": {
           "type": "boolean",
@@ -154,13 +161,6 @@
           "items": { "type": "string" },
           "description": "Extra path substrings to exclude (case-insensitive substring match on workspace-relative paths)."
         },
-        "contora.cooccurrenceWindow": {
-          "type": "number",
-          "default": 10,
-          "minimum": 2,
-          "maximum": 24,
-          "description": "Event window size for CONTEXT GRAPH co-occurrence edges."
-        },
         "contora.mergeDiskEventLog": {
           "type": "boolean",
           "default": true,
@@ -170,13 +170,77 @@
           "type": "boolean",
           "default": true,
           "description": "After Save session state, also write .contora/memory/latest-memory.json (ranked memory mirror)."
+        },
+        "contora.aiProvider": {
+          "type": "string",
+          "enum": ["off", "openai", "anthropic", "google", "deepseek"],
+          "default": "off",
+          "description": "Phase 3 BYOK: which LLM provider to use for on-demand semantic summary / intent / compression. Keys via \"Contora: Configure API key…\" (SecretStorage only)."
+        },
+        "contora.openaiModel": {
+          "type": "string",
+          "default": "gpt-4o-mini",
+          "description": "OpenAI chat model id when contora.aiProvider is openai."
+        },
+        "contora.openaiBaseUrl": {
+          "type": "string",
+          "default": "https://api.openai.com/v1",
+          "description": "OpenAI-compatible API base URL (no trailing slash)."
+        },
+        "contora.anthropicModel": {
+          "type": "string",
+          "default": "claude-3-5-haiku-20241022",
+          "description": "Anthropic model id when contora.aiProvider is anthropic."
+        },
+        "contora.googleModel": {
+          "type": "string",
+          "default": "gemini-1.5-flash",
+          "description": "Gemini model id when contora.aiProvider is google."
+        },
+        "contora.deepseekModel": {
+          "type": "string",
+          "default": "deepseek-chat",
+          "description": "DeepSeek chat model id when contora.aiProvider is deepseek (OpenAI-compatible API)."
+        },
+        "contora.deepseekBaseUrl": {
+          "type": "string",
+          "default": "https://api.deepseek.com/v1",
+          "description": "DeepSeek API base URL (OpenAI-compatible /v1/chat/completions; no trailing slash)."
+        },
+        "contora.aiMaxOutputTokens": {
+          "type": "number",
+          "default": 1024,
+          "minimum": 256,
+          "maximum": 4096,
+          "description": "Max completion tokens for BYOK AI calls (semantic / intent / compression)."
+        },
+        "contora.appendAiSummaryOnExport": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, \"Export AI context\" may append an extra BYOK LLM semantic block (uses API quota). Off by default to avoid surprise cost."
+        },
+        "contora.appendAiSummaryMinEvents": {
+          "type": "number",
+          "default": 24,
+          "minimum": 0,
+          "maximum": 500,
+          "description": "Minimum session events before an auto AI summary on export is attempted."
+        },
+        "contora.appendAiSummaryCooldownMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 5000,
+          "maximum": 3600000,
+          "description": "Minimum milliseconds between auto AI summaries on export for the same session fingerprint."
         }
       }
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
+    "vscode:prepublish": "node scripts/vscode-prepublish.cjs",
+    "vsix": "node scripts/package-vsix.cjs",
+    "build:runtime": "npm --prefix packages/runtime run build",
+    "compile": "npm run build:runtime && tsc -p ./",
     "watch": "tsc -watch -p ./"
   },
   "devDependencies": {
@@ -185,6 +249,7 @@
     "typescript": "^5.3.3"
   },
   "dependencies": {
+    "@contora/runtime": "file:packages/runtime",
     "simple-git": "^3.22.0"
   }
 }

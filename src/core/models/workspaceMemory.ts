@@ -18,6 +18,6 @@ export interface WorkspaceMemory {
   priorityFiles?: { path: string; score: number }[];
   /** Heuristic semantic summary markdown (spec 2.2). */
   semanticSummary?: string;
-  /** Co-occurrence graph summary text (spec 2.3) */
-  contextGraphSummary?: string;
+  /** Optional BYOK cloud summary (export only; not persisted to state.json). */
+  aiSemanticSummary?: string;
 }

@@ -1,15 +1,26 @@
 import * as vscode from 'vscode';
+import { ContoraKeyManager } from '../ai/auth/keyManager';
+import { readAiRuntimeSettings } from '../ai/auth/providerConfig';
+import { CONTORA_CONFIG_SECTION } from '../constants';
 import type { EventStore } from '../core/engine/eventStore';
+import { getLastIntentJson } from '../ai/runtime/intent/lastIntentStore';
 import { StateManager } from '../state/stateManager';
-import { buildSidebarWebviewState } from './sidebarViewModel';
+import {
+  buildSidebarWebviewState,
+  type SidebarAiIntentPanel,
+  type SidebarByokPanelState,
+} from './sidebarViewModel';
 
 type WebviewToExt =
   | { type: 'ready' }
   | { type: 'exportAIContext' }
   | { type: 'saveStateNow' }
   | { type: 'restoreSession' }
-  | { type: 'saveSnapshot' }
-  | { type: 'restoreFromSnapshot' }
+  | { type: 'configureApiKey' }
+  | { type: 'openContoraSettings' }
+  | { type: 'generateSemanticSummary' }
+  | { type: 'analyzeWorkspaceIntent' }
+  | { type: 'compressContextPreview' }
   | { type: 'updateTask'; value: string }
   | { type: 'updateNotes'; value: string }
   | { type: 'openFile'; relativePath: string };
@@ -22,12 +33,14 @@ export class ContoraSidebarProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private folder: vscode.WorkspaceFolder | undefined;
   private events?: EventStore;
+  private readonly keys: ContoraKeyManager;
 
   constructor(
     private readonly ctx: vscode.ExtensionContext,
     private readonly stateManager: StateManager,
     events?: EventStore,
   ) {
+    this.keys = new ContoraKeyManager(ctx.secrets);
     this.events = events;
   }
 
@@ -66,12 +79,25 @@ export class ContoraSidebarProvider implements vscode.WebviewViewProvider {
         await vscode.commands.executeCommand('contora.restoreSession');
         return;
       }
-      if (msg.type === 'saveSnapshot') {
-        await vscode.commands.executeCommand('contora.saveSnapshot');
+      if (msg.type === 'configureApiKey') {
+        await vscode.commands.executeCommand('contora.configureApiKey');
+        void this.pushStateToWebview();
         return;
       }
-      if (msg.type === 'restoreFromSnapshot') {
-        await vscode.commands.executeCommand('contora.restoreFromSnapshot');
+      if (msg.type === 'openContoraSettings') {
+        await vscode.commands.executeCommand('workbench.action.openSettings', CONTORA_CONFIG_SECTION);
+        return;
+      }
+      if (msg.type === 'generateSemanticSummary') {
+        await vscode.commands.executeCommand('contora.generateSemanticSummary');
+        return;
+      }
+      if (msg.type === 'analyzeWorkspaceIntent') {
+        await vscode.commands.executeCommand('contora.analyzeWorkspaceIntent');
+        return;
+      }
+      if (msg.type === 'compressContextPreview') {
+        await vscode.commands.executeCommand('contora.compressContextPreview');
         return;
       }
       const folder = this.folder ?? this.stateManager.getPrimaryFolder();
@@ -120,19 +146,115 @@ export class ContoraSidebarProvider implements vscode.WebviewViewProvider {
     await this.pushStateToWebview();
   }
 
+  private async loadByokPanelState(): Promise<SidebarByokPanelState> {
+    const cfg = vscode.workspace.getConfiguration(CONTORA_CONFIG_SECTION);
+    const [kOpen, kAnth, kGoo, kDeep] = await Promise.all([
+      this.keys.getKey('openai'),
+      this.keys.getKey('anthropic'),
+      this.keys.getKey('google'),
+      this.keys.getKey('deepseek'),
+    ]);
+    const keyOpenAI = Boolean(kOpen?.trim());
+    const keyAnthropic = Boolean(kAnth?.trim());
+    const keyGoogle = Boolean(kGoo?.trim());
+    const keyDeepseek = Boolean(kDeep?.trim());
+    const ai = readAiRuntimeSettings();
+    let activeModelId = '—';
+    if (ai.aiProvider === 'openai') {
+      activeModelId = ai.openaiModel;
+    } else if (ai.aiProvider === 'anthropic') {
+      activeModelId = ai.anthropicModel;
+    } else if (ai.aiProvider === 'google') {
+      activeModelId = ai.googleModel;
+    } else if (ai.aiProvider === 'deepseek') {
+      activeModelId = ai.deepseekModel;
+    }
+    const needsActiveProviderKey =
+      ai.aiProvider === 'openai'
+        ? !keyOpenAI
+        : ai.aiProvider === 'anthropic'
+          ? !keyAnthropic
+          : ai.aiProvider === 'google'
+            ? !keyGoogle
+            : ai.aiProvider === 'deepseek'
+              ? !keyDeepseek
+              : false;
+    return {
+      aiProvider: ai.aiProvider,
+      keyOpenAI,
+      keyAnthropic,
+      keyGoogle,
+      keyDeepseek,
+      activeModelId,
+      exportFormat: cfg.get<string>('exportFormat') ?? 'markdown',
+      exportTokenBudget: Math.max(0, cfg.get<number>('exportTokenBudget') ?? 0),
+      appendAiOnExport: cfg.get<boolean>('appendAiSummaryOnExport') === true,
+      defaultAIMode: cfg.get<string>('defaultAIMode') ?? 'feature',
+      needsActiveProviderKey,
+    };
+  }
+
+  private async readAiIntentForFolder(folder: vscode.WorkspaceFolder): Promise<SidebarAiIntentPanel> {
+    const empty: SidebarAiIntentPanel = { goals: [] };
+    const parseRecord = (o: Record<string, unknown>): SidebarAiIntentPanel => {
+      const mods = Array.isArray(o.activeModules)
+        ? o.activeModules
+            .filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+            .map((s) => s.trim())
+        : [];
+      const focus = typeof o.focus === 'string' && o.focus.trim() ? o.focus.trim() : '';
+      let goals = mods.slice(0, 12);
+      if (goals.length === 0 && focus) {
+        goals = [focus];
+      }
+      const intentMode = typeof o.mode === 'string' && o.mode.trim() ? o.mode.trim() : undefined;
+      return { goals, intentMode };
+    };
+    const uri = vscode.Uri.joinPath(folder.uri, '.contora', 'last-intent.json');
+    try {
+      const [stat, bytes] = await Promise.all([vscode.workspace.fs.stat(uri), vscode.workspace.fs.readFile(uri)]);
+      const text = Buffer.from(bytes).toString('utf8');
+      const parsed = JSON.parse(text) as unknown;
+      if (!parsed || typeof parsed !== 'object') {
+        return empty;
+      }
+      const out = parseRecord(parsed as Record<string, unknown>);
+      out.updatedAt = stat.mtime;
+      return out;
+    } catch {
+      const j = getLastIntentJson();
+      if (!j) {
+        return empty;
+      }
+      try {
+        const parsed = JSON.parse(j) as unknown;
+        if (!parsed || typeof parsed !== 'object') {
+          return empty;
+        }
+        const out = parseRecord(parsed as Record<string, unknown>);
+        out.updatedAt = Date.now();
+        return out;
+      } catch {
+        return empty;
+      }
+    }
+  }
+
   private async pushStateToWebview(): Promise<void> {
     if (!this.view) {
       return;
     }
     const folder = this.folder ?? this.stateManager.getPrimaryFolder();
+    const byok = await this.loadByokPanelState();
     if (!folder) {
-      this.view.webview.postMessage({ type: 'state', state: null });
+      this.view.webview.postMessage({ type: 'state', state: null, byok });
       return;
     }
     const state = await this.stateManager.load(folder);
     const ver = String((this.ctx.extension.packageJSON as { version?: string }).version ?? '');
-    const payload = buildSidebarWebviewState(state, this.events, ver);
-    this.view.webview.postMessage({ type: 'state', state: payload });
+    const base = buildSidebarWebviewState(state, this.events, ver);
+    const aiIntent = await this.readAiIntentForFolder(folder);
+    this.view.webview.postMessage({ type: 'state', state: { ...base, aiIntent }, byok });
   }
 
   private getHtml(webview: vscode.Webview): string {
@@ -150,9 +272,6 @@ export class ContoraSidebarProvider implements vscode.WebviewViewProvider {
     const svg = (paths: string, w = 14, h = 14) =>
       `<svg class="cr-ico-svg" xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">${paths}</svg>`;
     const ico = {
-      db: svg(
-        '<path d="M8 1C4.5 1 2 2.2 2 3.75v8.5C2 13.8 4.5 15 8 15s6-1.2 6-2.75v-8.5C14 2.2 11.5 1 8 1zm0 1c2.5 0 4.25.7 4.25 1.5S10.5 5 8 5 3.75 4.3 3.75 3.5 5.5 2 8 2zm4.25 10.25c0 .8-1.75 1.5-4.25 1.5s-4.25-.7-4.25-1.5V11c1.1.5 2.5.75 4.25.75s3.15-.25 4.25-.75v1.25zm0-3.25C12.15 11 10.2 12 8 12s-4.15-1-4.25-2.5V8.25C4.85 8.75 6.3 9 8 9s3.15-.25 4.25-.75V10zm0-3.25C12.15 7.75 10.2 9 8 9S3.85 7.75 3.75 6.25V5C4.85 5.5 6.3 5.75 8 5.75s3.15-.25 4.25-.75V6.75z"/>',
-      ),
       copy: svg(
         '<path d="M4 1h8v2H4V1zm-1 3h9v11H3V4zm2 2v7h5V6H5zm7-4h2v9h-2V2z"/>',
       ),
@@ -201,7 +320,11 @@ export class ContoraSidebarProvider implements vscode.WebviewViewProvider {
       bell: svg(
         '<path d="M8 1a3 3 0 0 0-3 3v2.5L4 10h8l-1-3.5V4a3 3 0 0 0-3-3zm-1 11h2a1 1 0 0 1-2 0z"/>',
       ),
+      code: svg(
+        '<path d="M5.5 3.2L2 8l3.5 4.8h1.4L3.2 8 6.9 3.2H5.5zm5 0L14 8l-3.5 4.8H9.1L12.8 8 9.1 3.2h1.4zM9.2 3.3h1.1l-3.4 9.4H5.8l3.4-9.4z"/>',
+      ),
       plus: svg('<path d="M8 3v5h5v1H8v5H7V9H2V8h5V3h1z"/>', 12, 12),
+      jumpDown: svg('<path d="M8 11.5L3.5 7h9L8 11.5zm0 2L3.5 9h9l-4.5 4.5z"/>', 14, 14),
     };
     return `<!DOCTYPE html>
 <html lang="en">
@@ -270,38 +393,154 @@ export class ContoraSidebarProvider implements vscode.WebviewViewProvider {
       opacity: 0.72;
     }
     .cr-icon-pill:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
-    .cr-info {
-      display: flex;
-      gap: 10px;
-      align-items: flex-start;
-      background: var(--vscode-editor-inactiveSelectionBackground, rgba(127,127,127,.12));
+    .cr-ai-card {
+      background: var(--vscode-editor-inactiveSelectionBackground, rgba(127,127,127,.1));
       border: 1px solid var(--vscode-widget-border, rgba(127,127,127,.2));
-      border-radius: 8px;
-      padding: 10px 10px 10px 8px;
+      border-radius: 10px;
+      padding: 10px 10px 8px;
       margin-bottom: 12px;
     }
-    .cr-info-ico {
+    .cr-ai-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .cr-ai-card-title {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--vscode-foreground);
+    }
+    .cr-ai-card-title .cr-ico-svg { width: 14px; height: 14px; opacity: 0.9; }
+    .cr-ai-card-status {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground);
       flex-shrink: 0;
-      width: 32px;
-      height: 32px;
+    }
+    .cr-ai-card-status .cr-dot { background: var(--vscode-testing-iconPassed, #3fb950); }
+    .cr-ai-focus-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+    .cr-ai-label {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      color: var(--vscode-descriptionForeground);
+      text-transform: uppercase;
+    }
+    .cr-ai-goals-label {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      color: var(--vscode-descriptionForeground);
+      text-transform: uppercase;
+      margin: 10px 0 4px;
+    }
+    ul.cr-ai-goals-list {
+      margin: 0;
+      padding: 0 0 0 16px;
+      font-size: 12px;
+      line-height: 1.45;
+      color: var(--vscode-foreground);
+    }
+    ul.cr-ai-goals-list li { margin: 2px 0; }
+    .cr-ai-goals-empty {
+      margin: 4px 0 0;
+      font-size: 11px;
+      line-height: 1.4;
+      color: var(--vscode-descriptionForeground);
+    }
+    .cr-ai-card-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .cr-ai-side-strip {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr auto;
+      gap: 6px;
+      align-items: end;
+      padding-top: 8px;
+      margin-top: 4px;
+      border-top: 1px solid var(--vscode-widget-border, rgba(127,127,127,.15));
+    }
+    .cr-ai-jump-byok {
       display: flex;
       align-items: center;
       justify-content: center;
+      width: 26px;
+      height: 26px;
+      margin-bottom: 1px;
+      padding: 0;
+      flex-shrink: 0;
+      border: none;
       border-radius: 6px;
+      background: transparent;
+      color: var(--vscode-descriptionForeground);
+      cursor: pointer;
+    }
+    .cr-ai-jump-byok:hover {
       color: var(--vscode-textLink-foreground);
-      background: var(--vscode-editor-background, rgba(0,0,0,.2));
+      background: var(--vscode-toolbar-hoverBackground);
     }
-    .cr-info-ico .cr-ico-svg { width: 18px; height: 18px; }
-    .cr-info-body { min-width: 0; }
-    .cr-info-title { font-size: 12px; color: var(--vscode-foreground); margin: 0 0 4px; }
-    .cr-info-sub { font-size: 11px; color: var(--vscode-descriptionForeground); margin: 0; }
-    .cr-info code {
+    .cr-ai-jump-byok:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 1px;
+    }
+    .cr-ai-jump-byok .cr-ico-svg { width: 14px; height: 14px; opacity: 0.88; }
+    .cr-ai-side-cell {
+      min-width: 0;
+      font-size: 10px;
+      line-height: 1.35;
+    }
+    .cr-ai-side-k {
+      display: block;
+      color: var(--vscode-descriptionForeground);
+      margin-bottom: 2px;
+    }
+    .cr-ai-side-v {
+      display: block;
       font-size: 11px;
-      color: var(--vscode-textPreformat-foreground);
-      padding: 0 3px;
-      border-radius: 3px;
-      background: var(--vscode-textCodeBlock-background, rgba(127,127,127,.15));
+      font-weight: 600;
+      color: var(--vscode-foreground);
+      word-break: break-word;
     }
+    .cr-ai-side-v .cr-ai-byok-muted { font-weight: 500; color: var(--vscode-descriptionForeground); }
+    .cr-ai-side-mode { color: var(--vscode-symbolIcon-arrayForeground, #c586c0); font-weight: 600; }
+    .cr-badge-pro {
+      display: inline-block;
+      margin-left: 4px;
+      padding: 0 5px;
+      font-size: 9px;
+      font-weight: 700;
+      vertical-align: middle;
+      border-radius: 3px;
+      color: var(--vscode-button-foreground);
+      background: var(--vscode-button-background);
+    }
+    .cr-ai-card-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px solid var(--vscode-widget-border, rgba(127,127,127,.15));
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground);
+    }
+    .cr-ai-foot-ctx { color: var(--vscode-textLink-foreground); cursor: default; }
     .cr-actions { display: flex; flex-direction: column; gap: 8px; margin-bottom: 4px; }
     button.cr-primary {
       width: 100%;
@@ -405,11 +644,38 @@ export class ContoraSidebarProvider implements vscode.WebviewViewProvider {
       font-family: var(--vscode-font-family);
       font-size: var(--vscode-font-size);
     }
-    textarea#task {
-      min-height: 76px;
+    textarea#task.cr-task-input {
+      background: transparent;
+      color: var(--vscode-foreground);
+      border: 1px dashed var(--vscode-widget-border, rgba(127,127,127,.4));
+      border-radius: 6px;
+      box-shadow: none;
+      font-size: 12px;
+      padding: 5px 8px;
+      min-height: 34px;
+      max-height: 100px;
       resize: vertical;
-      border-color: var(--vscode-focusBorder, var(--vscode-input-border));
-      box-shadow: inset 0 0 0 1px rgba(0,122,204,.08);
+      line-height: 1.4;
+      opacity: 0.95;
+      transition: border-color 0.12s ease, background 0.12s ease, opacity 0.12s ease;
+    }
+    textarea#task.cr-task-input::placeholder {
+      color: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground));
+      opacity: 0.75;
+    }
+    textarea#task.cr-task-input:hover {
+      opacity: 1;
+      background: var(--vscode-input-background, rgba(127,127,127,.06));
+      border-color: var(--vscode-input-border, rgba(127,127,127,.45));
+      border-style: solid;
+    }
+    textarea#task.cr-task-input:focus {
+      opacity: 1;
+      outline: none;
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground, var(--vscode-foreground));
+      border: 1px solid var(--vscode-focusBorder, var(--vscode-input-border));
+      border-style: solid;
     }
     textarea#notes { min-height: 68px; resize: vertical; margin-top: 2px; }
     .cr-tags {
@@ -574,50 +840,89 @@ export class ContoraSidebarProvider implements vscode.WebviewViewProvider {
       background: var(--vscode-testing-iconPassed, #3fb950);
       flex-shrink: 0;
     }
-    .cr-footer-gear { display: flex; color: var(--vscode-descriptionForeground); opacity: 0.85; }
+    .cr-footer-gear { display: flex; color: var(--vscode-descriptionForeground); opacity: 0.85; cursor: pointer; }
+    .cr-footer-gear:hover { color: var(--vscode-textLink-foreground); opacity: 1; }
+    .cr-byok {
+      background: var(--vscode-editor-inactiveSelectionBackground, rgba(127,127,127,.08));
+      border: 1px solid var(--vscode-widget-border, rgba(127,127,127,.18));
+      border-radius: 8px;
+      padding: 8px 10px 10px;
+    }
+    .cr-byok-line { margin: 0 0 6px; font-size: 12px; line-height: 1.35; color: var(--vscode-foreground); }
+    .cr-byok-muted { font-size: 11px; color: var(--vscode-descriptionForeground); }
+    .cr-byok-warn {
+      margin: 8px 0 0;
+      padding: 6px 8px;
+      font-size: 11px;
+      border-radius: 6px;
+      color: var(--vscode-inputValidation-warningForeground);
+      background: var(--vscode-inputValidation-warningBackground);
+      border: 1px solid var(--vscode-inputValidation-warningBorder, transparent);
+    }
+    #crByokSection { scroll-margin-top: 10px; }
   </style>
 </head>
 <body>
   <header class="cr-header">
     <div class="cr-brand"><span class="cr-logo">C</span> CONTORA</div>
     <div class="cr-header-actions" aria-hidden="true">
-      <span class="cr-icon-pill" title="Toolbar (decorative)">${ico.refresh}</span>
-      <span class="cr-icon-pill" title="Toolbar (decorative)">${ico.more}</span>
-      <span class="cr-icon-pill" title="Toolbar (decorative)">${ico.bell}</span>
+      <span class="cr-icon-pill" title="Decorative">${ico.refresh}</span>
+      <span class="cr-icon-pill" title="Decorative">${ico.more}</span>
+      <span class="cr-icon-pill" title="Decorative">${ico.bell}</span>
     </div>
   </header>
 
-  <div class="cr-info">
-    <div class="cr-info-ico">${ico.db}</div>
-    <div class="cr-info-body">
-      <p class="cr-info-title">State is written to <code>.contora/state.json</code></p>
-      <p class="cr-info-sub">Context engine · events + structured export. Lists hide <code>.contora</code>, <code>node_modules</code>, <code>dist</code>, …</p>
+  <section class="cr-ai-card" aria-label="AI status">
+    <div class="cr-ai-card-head">
+      <span class="cr-ai-card-title">${ico.code} AI status</span>
+      <span class="cr-ai-card-status"><span class="cr-dot"></span>Running</span>
     </div>
-  </div>
+    <div class="cr-ai-card-grid">
+      <div>
+        <div class="cr-ai-focus-row">
+          <span class="cr-ai-label">Current focus</span>
+          <span class="cr-task-meta" style="display:flex;align-items:center;gap:6px">
+            <span class="cr-sec-ico" style="opacity:.45" aria-hidden="true" title="Keywords from text">${ico.plus}</span>
+            <span id="taskCount">0 / ${TASK_MAX}</span>
+          </span>
+        </div>
+        <textarea id="task" class="cr-task-input" rows="2" maxlength="${TASK_MAX}" placeholder="Enter what you're working on right now."></textarea>
+        <div id="taskTags" class="cr-tags" aria-hidden="true"></div>
+        <p class="cr-ai-goals-label">AI inferred goals</p>
+        <ul id="aiIntentGoals" class="cr-ai-goals-list" hidden></ul>
+        <p id="aiIntentEmpty" class="cr-ai-goals-empty">None yet. Run &quot;Analyze workspace intent (AI)&quot; to show inferred modules and focus here.</p>
+      </div>
+      <div class="cr-ai-side-strip" aria-label="Model and runtime summary">
+        <div class="cr-ai-side-cell">
+          <span class="cr-ai-side-k">Model</span>
+          <span class="cr-ai-side-v"><span id="aiStatModel">—</span><span class="cr-badge-pro" id="aiStatTierBadge" hidden>Pro</span></span>
+        </div>
+        <div class="cr-ai-side-cell">
+          <span class="cr-ai-side-k">Runtime</span>
+          <span class="cr-ai-side-v" id="aiStatRuntime">—</span>
+        </div>
+        <div class="cr-ai-side-cell">
+          <span class="cr-ai-side-k">Mode</span>
+          <span class="cr-ai-side-v cr-ai-side-mode" id="aiStatMode">—</span>
+        </div>
+        <button type="button" class="cr-ai-jump-byok" id="btnJumpByok" title="Scroll to BYOK / Cloud AI (v3)" aria-label="Scroll to BYOK / Cloud AI">${ico.jumpDown}</button>
+      </div>
+      <div class="cr-ai-card-foot">
+        <span id="aiStatUpdated">—</span>
+        <span id="aiStatCtx" class="cr-ai-foot-ctx">—</span>
+      </div>
+    </div>
+  </section>
 
   <div class="cr-actions">
-    <button type="button" class="cr-primary" id="btnExport" title="Copy structured context for your AI">
+    <button type="button" class="cr-primary" id="btnExport" title="Copy structured context to the clipboard">
       ${ico.copy}<span>Copy AI context</span>${ico.spark}
     </button>
     <div class="cr-grid2">
-      <button type="button" class="cr-secondary" id="btnSave" title="Flush state to disk">${ico.save}<span>Save now</span></button>
-      <button type="button" class="cr-secondary" id="btnRestore" title="Re-open editors from last saved state">${ico.history}<span>Restore editors</span></button>
-      <button type="button" class="cr-tertiary" id="btnSnap" title="Checkpoint on disk">${ico.camera}<span>Save snapshot</span></button>
-      <button type="button" class="cr-tertiary" id="btnRestoreSnap" title="Restore from a checkpoint file">${ico.history}<span>Restore snapshot</span></button>
+      <button type="button" class="cr-secondary" id="btnSave" title="Write state to disk">${ico.save}<span>Save now</span></button>
+      <button type="button" class="cr-secondary" id="btnRestore" title="Reopen editors from last saved state">${ico.history}<span>Restore editors</span></button>
     </div>
   </div>
-
-  <section class="cr-section">
-    <div class="cr-section-head">
-      <span class="cr-sec-left"><span class="cr-sec-ico">${ico.target}</span><span>Current focus</span></span>
-      <span class="cr-task-meta" style="display:flex;align-items:center;gap:6px">
-        <span class="cr-sec-ico" style="opacity:.45" aria-hidden="true" title="Keywords from text">${ico.plus}</span>
-        <span id="taskCount">0 / ${TASK_MAX}</span>
-      </span>
-    </div>
-    <textarea id="task" rows="3" maxlength="${TASK_MAX}" placeholder="What are you working on? (shown in exports and ranking)"></textarea>
-    <div id="taskTags" class="cr-tags" aria-hidden="true"></div>
-  </section>
 
   <section class="cr-section">
     <div class="cr-section-head">
@@ -635,7 +940,7 @@ export class ContoraSidebarProvider implements vscode.WebviewViewProvider {
       <div class="cr-sum-line" id="sumGit">
         <span class="cr-sum-ico cr-sum-ico--git">${ico.branch}</span>
         <div class="cr-sum-main">
-          <span class="cr-sum-muted">Git changes</span>
+          <span class="cr-sum-muted">Git</span>
           <div class="cr-sum-body" id="sumGitBody">—</div>
         </div>
       </div>
@@ -651,7 +956,7 @@ export class ContoraSidebarProvider implements vscode.WebviewViewProvider {
 
   <section class="cr-section">
     <div class="cr-section-head">
-      <span class="cr-sec-left"><span class="cr-sec-ico">${ico.file}</span><span>Active files (recent focus)</span></span>
+      <span class="cr-sec-left"><span class="cr-sec-ico">${ico.file}</span><span>Active files (recent)</span></span>
       <span class="cr-link-quiet">More</span>
     </div>
     <ul id="recent" class="cr-file-list"></ul>
@@ -660,23 +965,46 @@ export class ContoraSidebarProvider implements vscode.WebviewViewProvider {
   <details class="cr-git" open>
     <summary><span class="cr-sec-ico" style="margin-right:2px">${ico.branch}</span> Git changes</summary>
     <div class="cr-git-sub">
-      <div class="cr-git-label"><span class="cr-git-ico">${ico.check}</span> Ready to commit</div>
+      <div class="cr-git-label"><span class="cr-git-ico">${ico.check}</span> Staged</div>
       <ul id="gitStaged" class="cr-file-list"></ul>
     </div>
     <div class="cr-git-sub">
-      <div class="cr-git-label"><span class="cr-git-ico">${ico.history}</span> Uncommitted changes</div>
+      <div class="cr-git-label"><span class="cr-git-ico">${ico.history}</span> Unstaged</div>
       <ul id="gitWorking" class="cr-file-list"></ul>
     </div>
   </details>
 
   <label class="cr-notes-label" for="notes"><span class="cr-sec-ico">${ico.note}</span> Context notes</label>
-  <textarea id="notes" rows="4" placeholder="Scratch notes for you or the AI (export)…"></textarea>
+  <textarea id="notes" rows="4" placeholder="Scratch notes included in export…"></textarea>
+
+  <section class="cr-section" id="crByokSection" style="margin-top:16px">
+    <div class="cr-section-head">
+      <span class="cr-sec-left"><span class="cr-sec-ico">${ico.gear}</span><span>BYOK / Cloud AI (v3)</span></span>
+    </div>
+    <div class="cr-byok">
+      <p class="cr-byok-line cr-byok-muted" id="byokRuntime">—</p>
+      <p class="cr-byok-line" id="byokProvider">—</p>
+      <p class="cr-byok-line cr-byok-muted" id="byokKeys">—</p>
+      <p class="cr-byok-line cr-byok-muted" id="byokModel">—</p>
+      <p class="cr-byok-line cr-byok-muted" id="byokExport">—</p>
+      <p class="cr-byok-warn" id="byokWarn" hidden>Set <code>contora.aiProvider</code> and save the vendor API key in SecretStorage (never in <code>settings.json</code>).</p>
+      <div class="cr-grid2" style="margin-top:10px">
+        <button type="button" class="cr-secondary" id="btnByokKey" title="OpenAI / Anthropic / Gemini / DeepSeek">${ico.gear}<span>Configure API key…</span></button>
+        <button type="button" class="cr-secondary" id="btnByokSettings" title="Models, export format, token budget…">${ico.spark}<span>Contora settings</span></button>
+      </div>
+      <div style="margin-top:8px;display:flex;flex-direction:column;gap:4px">
+        <button type="button" class="cr-tertiary" id="btnAiSemantic">AI semantic summary</button>
+        <button type="button" class="cr-tertiary" id="btnAiIntent">Analyze workspace intent (AI)</button>
+        <button type="button" class="cr-tertiary" id="btnAiCompress">Compress context preview (AI)</button>
+      </div>
+    </div>
+  </section>
 
   <footer class="cr-footer">
     <span id="crVersion">Contora</span>
     <span class="cr-local">
       <span class="cr-dot" title="No cloud sync"></span> Local only
-      <span class="cr-footer-gear" title="Settings in VS Code">${ico.gear}</span>
+      <span class="cr-footer-gear" id="btnFooterSettings" role="button" tabindex="0" title="Open Contora settings">${ico.gear}</span>
     </span>
   </footer>
 
@@ -696,6 +1024,20 @@ export class ContoraSidebarProvider implements vscode.WebviewViewProvider {
     const sumGitBody = document.getElementById('sumGitBody');
     const sumActivityBody = document.getElementById('sumActivityBody');
     const crVersion = document.getElementById('crVersion');
+    const byokRuntime = document.getElementById('byokRuntime');
+    const byokProvider = document.getElementById('byokProvider');
+    const byokKeys = document.getElementById('byokKeys');
+    const byokModel = document.getElementById('byokModel');
+    const byokExport = document.getElementById('byokExport');
+    const byokWarn = document.getElementById('byokWarn');
+    const aiIntentGoalsEl = document.getElementById('aiIntentGoals');
+    const aiIntentEmptyEl = document.getElementById('aiIntentEmpty');
+    const aiStatModel = document.getElementById('aiStatModel');
+    const aiStatRuntime = document.getElementById('aiStatRuntime');
+    const aiStatMode = document.getElementById('aiStatMode');
+    const aiStatUpdated = document.getElementById('aiStatUpdated');
+    const aiStatCtx = document.getElementById('aiStatCtx');
+    const aiStatTierBadge = document.getElementById('aiStatTierBadge');
     const _tplIco = document.getElementById('tpl-file-ico');
     const fileIcoHtml = _tplIco ? _tplIco.innerHTML : '';
 
@@ -749,8 +1091,15 @@ export class ContoraSidebarProvider implements vscode.WebviewViewProvider {
     document.getElementById('btnExport').addEventListener('click', () => vscode.postMessage({ type: 'exportAIContext' }));
     document.getElementById('btnSave').addEventListener('click', () => vscode.postMessage({ type: 'saveStateNow' }));
     document.getElementById('btnRestore').addEventListener('click', () => vscode.postMessage({ type: 'restoreSession' }));
-    document.getElementById('btnSnap').addEventListener('click', () => vscode.postMessage({ type: 'saveSnapshot' }));
-    document.getElementById('btnRestoreSnap').addEventListener('click', () => vscode.postMessage({ type: 'restoreFromSnapshot' }));
+    const btnJumpByok = document.getElementById('btnJumpByok');
+    if (btnJumpByok) {
+      btnJumpByok.addEventListener('click', () => {
+        const el = document.getElementById('crByokSection');
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      });
+    }
 
     const LIST_CAP = 5;
     const expandState = { recent: false, staged: false, working: false };
@@ -777,7 +1126,7 @@ export class ContoraSidebarProvider implements vscode.WebviewViewProvider {
       if (items.length > LIST_CAP) {
         const toggle = document.createElement('li');
         toggle.className = 'toggle-more';
-        toggle.textContent = expanded ? 'Show less' : 'More';
+        toggle.textContent = expanded ? 'Less' : 'More';
         toggle.addEventListener('click', (e) => {
           e.preventDefault();
           expandState[sectionKey] = !expandState[sectionKey];
@@ -787,12 +1136,143 @@ export class ContoraSidebarProvider implements vscode.WebviewViewProvider {
       }
     }
 
+    function paintByok(b) {
+      if (!byokProvider || !byokKeys || !byokModel || !byokExport || !byokWarn) return;
+      if (!byokRuntime) return;
+      if (!b) {
+        byokRuntime.textContent = '—';
+        byokProvider.textContent = '—';
+        byokKeys.textContent = '—';
+        byokModel.textContent = '—';
+        byokExport.textContent = '—';
+        byokWarn.hidden = true;
+        return;
+      }
+      byokRuntime.textContent = 'Runtime: Contora (@contora/runtime)';
+      const labels = {
+        off: 'Off (local heuristics only)',
+        openai: 'OpenAI',
+        anthropic: 'Anthropic (Claude)',
+        google: 'Google Gemini',
+        deepseek: 'DeepSeek',
+      };
+      byokProvider.textContent = 'Provider: ' + (labels[b.aiProvider] || b.aiProvider);
+      function mark(name, ok) {
+        return name + (ok ? ' ✓' : ' —');
+      }
+      byokKeys.textContent =
+        'Keys: ' +
+        mark('OpenAI', b.keyOpenAI) +
+        ' · ' +
+        mark('Claude', b.keyAnthropic) +
+        ' · ' +
+        mark('Gemini', b.keyGoogle) +
+        ' · ' +
+        mark('DeepSeek', b.keyDeepseek);
+      byokModel.textContent =
+        b.aiProvider === 'off' ? 'Model: (BYOK off)' : 'Model: ' + (b.activeModelId || '—');
+      const budgetTxt =
+        !b.exportTokenBudget || b.exportTokenBudget <= 0 ? 'Unlimited' : String(b.exportTokenBudget) + ' tokens';
+      byokExport.textContent =
+        'Export: ' +
+        (b.exportFormat || 'markdown') +
+        ' · budget ' +
+        budgetTxt +
+        ' · append AI on export: ' +
+        (b.appendAiOnExport ? 'on' : 'off') +
+        ' · default mode: ' +
+        (b.defaultAIMode || 'feature');
+      byokWarn.hidden = !b.needsActiveProviderKey;
+    }
+
+    function formatIntentUpdated(ts) {
+      if (ts == null || !Number.isFinite(ts)) {
+        return 'Unknown time';
+      }
+      const mins = Math.max(0, Math.round((Date.now() - ts) / 60000));
+      if (mins === 0) {
+        return 'Just updated';
+      }
+      if (mins < 60) {
+        return 'Updated ' + mins + ' min ago';
+      }
+      const h = Math.floor(mins / 60);
+      return 'Updated ' + h + ' h ago';
+    }
+
+    function paintAiIntentPanel(ai) {
+      if (!aiIntentGoalsEl || !aiIntentEmptyEl) {
+        return;
+      }
+      const goals = (ai && ai.goals) || [];
+      aiIntentGoalsEl.innerHTML = '';
+      if (goals.length === 0) {
+        aiIntentGoalsEl.hidden = true;
+        aiIntentEmptyEl.hidden = false;
+      } else {
+        aiIntentEmptyEl.hidden = true;
+        aiIntentGoalsEl.hidden = false;
+        for (const g of goals) {
+          const li = document.createElement('li');
+          li.textContent = g;
+          aiIntentGoalsEl.appendChild(li);
+        }
+      }
+      if (aiStatUpdated) {
+        aiStatUpdated.textContent =
+          goals.length === 0 ? 'No workspace intent yet' : formatIntentUpdated(ai && ai.updatedAt);
+      }
+    }
+
+    function paintAiRibbon(b, aiIntent) {
+      if (!aiStatModel || !aiStatRuntime || !aiStatMode || !aiStatCtx || !aiStatTierBadge) {
+        return;
+      }
+      paintAiIntentPanel(aiIntent);
+      if (!b) {
+        aiStatModel.textContent = '—';
+        aiStatTierBadge.hidden = true;
+        aiStatRuntime.textContent = '—';
+        aiStatMode.textContent = '—';
+        aiStatCtx.textContent = 'Export token budget —';
+        return;
+      }
+      aiStatModel.textContent = b.aiProvider === 'off' ? '(cloud off)' : b.activeModelId || '—';
+      aiStatTierBadge.hidden = true;
+      if (b.aiProvider === 'off') {
+        aiStatRuntime.textContent = 'Local heuristics';
+      } else {
+        aiStatRuntime.innerHTML =
+          'Cloud AI (v3)<span class="cr-ai-byok-muted"> BYOK</span>';
+      }
+      const modeFromIntent = aiIntent && aiIntent.intentMode;
+      aiStatMode.textContent = modeFromIntent || b.defaultAIMode || 'feature';
+      const budgetTxt =
+        !b.exportTokenBudget || b.exportTokenBudget <= 0 ? 'no cap' : String(b.exportTokenBudget) + ' tokens';
+      aiStatCtx.textContent = 'Context ' + budgetTxt;
+    }
+
+    function wireClick(el, type) {
+      if (!el) return;
+      el.addEventListener('click', function () { vscode.postMessage({ type: type }); });
+      el.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); vscode.postMessage({ type: type }); }
+      });
+    }
+
     function paintSummary(s) {
       if (!s || !s.summary) return;
       sumActiveBody.textContent = s.summary.activeFilesLine;
       sumGitBody.textContent = s.summary.gitLine;
       sumActivityBody.textContent = s.summary.activityLine;
     }
+
+    wireClick(document.getElementById('btnByokKey'), 'configureApiKey');
+    wireClick(document.getElementById('btnByokSettings'), 'openContoraSettings');
+    wireClick(document.getElementById('btnFooterSettings'), 'openContoraSettings');
+    wireClick(document.getElementById('btnAiSemantic'), 'generateSemanticSummary');
+    wireClick(document.getElementById('btnAiIntent'), 'analyzeWorkspaceIntent');
+    wireClick(document.getElementById('btnAiCompress'), 'compressContextPreview');
 
     function paintLists(s) {
       renderCollapsibleList(recentEl, s.recentFiles || [], 'recent');
@@ -804,6 +1284,8 @@ export class ContoraSidebarProvider implements vscode.WebviewViewProvider {
       const msg = event.data;
       if (!msg || msg.type !== 'state') return;
       const s = msg.state;
+      paintByok(msg.byok || null);
+      paintAiRibbon(msg.byok || null, s && s.aiIntent ? s.aiIntent : null);
       if (!s) {
         lastState = null;
         expandState.recent = false;
@@ -815,7 +1297,7 @@ export class ContoraSidebarProvider implements vscode.WebviewViewProvider {
         paintLists({ recentFiles: [], gitStaged: [], gitWorking: [] });
         sumActiveBody.textContent = '—';
         sumGitBody.textContent = '—';
-        sumActivityBody.textContent = '—';
+        sumActivityBody.textContent = 'Open a folder workspace to collect context.';
         crVersion.textContent = 'Contora';
         return;
       }

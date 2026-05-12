@@ -20,24 +20,15 @@ export { maxScoreBreakdown, combinedNormalizedScore, type ScoreBreakdownMax } fr
 export { formatPathRankingExplain, buildTopRankingDebugLines } from './ranking/rankingDebugger';
 export { RANKING_FACTORS } from './ranking/rankingFactors';
 export { buildContextPayloadV2, type ContextPayloadV2 } from './schema/contextPayloadV2';
-export { buildMcpGetContextEnvelope, type McpGetContextEnvelope } from './mcp/contextProvider';
-export { formatWithAdapter, type ExportFormat } from './adapters/exportAdapters';
+export { formatWithAdapter, type ExportFormat, estimateExportAdapterOverheadTokens } from './adapters/exportAdapters';
 export { shouldIgnoreWorkspacePath, IgnoreMatcher } from './ignore/ignoreMatcher';
 export { loadCustomIgnorePatterns } from './ignore/customIgnoreLoader';
 export { DEFAULT_IGNORE_SUBSTRINGS } from './ignore/defaultIgnoreRules';
 export { estimateTokens } from './budget/tokenEstimator';
 export { trimStringToTokenBudget, trimContextPayloadForBudget } from './budget/contextTrimmer';
 export { shrinkRankedForBudget, budgetAllowsFullExport, allocate, type AllocateOptions, type AllocateResult } from './budget/priorityAllocator';
-export { buildCheckpoint, type CheckpointV1, CHECKPOINT_VERSION } from './snapshots/checkpointBuilder';
-export {
-  writeCheckpointFile,
-  listSnapshots,
-  readCheckpointForRestore,
-  type SnapshotListEntry,
-} from './snapshots/snapshotManager';
 export { appendEventJsonl, eventLogPathForSession, EventLog } from './events/eventLog';
 export { getCurrentSessionId } from './events/sessionManager';
-export { buildCooccurrenceGraph, formatContextGraphForPrompt } from './graph/contextGraph';
 export { dedupeOrderedPaths, countDuplicatePaths } from './compression/duplicateReducer';
 export { basenameOnly, tierCompressPaths } from './compression/summaryCompressor';
 export { topHotDirectories } from './focus/hotAreaDetector';

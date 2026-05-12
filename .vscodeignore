@@ -8,3 +8,10 @@ src/**
 .project-recall/**
 .contora/**
 .context-recall/**
+
+# Dev-only (packaging); not needed inside the installed extension.
+scripts/**
+
+# Do not ship TypeScript compiler or type packages inside the VSIX (runtime never needs them).
+node_modules/typescript/**
+node_modules/@types/**

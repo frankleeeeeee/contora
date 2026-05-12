@@ -4,7 +4,7 @@ import type { WorkspaceMemory } from '../models/workspaceMemory';
 import type { ActivityAnalysis } from '../semantic/activityAnalyzer';
 
 /**
- * Context Schema v2 (spec 2.2) — stable shape for JSON / MCP / agents.
+ * Context Schema v2 — Lite: export payload without graph / MCP sidecars / evaluation / timeline.
  */
 export interface ContextPayloadV2 {
   session: { id: string };
@@ -18,16 +18,8 @@ export interface ContextPayloadV2 {
     fileActivityTop: [string, number][];
   };
   recentEvents: WorkspaceEvent[];
-  /** Lightweight file co-occurrence (spec 2.3) */
-  contextGraph?: Record<string, string[]>;
   instructions: { mode: AIMode; text: string; strategy: string };
-  /** Spec 2.4 addendum: behavioral intent sidecar */
-  intelligence?: {
-    likelyIntent: string;
-    developmentPattern: string;
-    workspaceFocus: string;
-  };
-  /** Spec 2.4 addendum: heuristic export quality */
+  /** Heuristic export quality */
   quality?: {
     score: number;
     warnings: string[];
@@ -42,8 +34,6 @@ export function buildContextPayloadV2(
   mode: AIMode,
   instruction: string,
   strategyLabel: string,
-  contextGraph?: Record<string, string[]>,
-  intelligence?: ContextPayloadV2['intelligence'],
   quality?: ContextPayloadV2['quality'],
 ): ContextPayloadV2 {
   const topFolders = Object.entries(analysis.folderHits)
@@ -68,9 +58,7 @@ export function buildContextPayloadV2(
       fileActivityTop,
     },
     recentEvents: memory.recentEvents,
-    contextGraph,
     instructions: { mode, text: instruction, strategy: strategyLabel },
-    intelligence,
     quality,
   };
 }

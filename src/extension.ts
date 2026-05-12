@@ -7,21 +7,16 @@ import {
   allocate,
   analyzeActivity,
   analyzeContextQuality,
-  buildCheckpoint,
   buildContextPayloadV2,
-  buildCooccurrenceGraph,
   buildSemanticSummaryBlock,
   countDuplicatePaths,
-  formatContextGraphForPrompt,
   formatWithAdapter,
   getModeStrategy,
   listIgnoredPathIssues,
-  listSnapshots,
   rankContextFilesWithDebug,
-  readCheckpointForRestore,
   trimContextPayloadForBudget,
   trimStringToTokenBudget,
-  writeCheckpointFile,
+  estimateExportAdapterOverheadTokens,
   estimateTokens,
   type ExportFormat,
 } from './core';
@@ -30,10 +25,14 @@ import { IgnoreMatcher, shouldIgnoreWorkspacePath } from './core/ignore/ignoreMa
 import { appendEventJsonl, EventLog } from './core/events/eventLog';
 import { WorkspaceScanner } from './scanner/workspaceScanner';
 import { StateManager } from './state/stateManager';
-import { autoRestoreIfEnabled, restoreEditorsFromState } from './state/recovery';
+import { restoreEditorsFromState } from './state/recovery';
 import { writeLatestMemoryJson } from './storage/memoryWriter';
 import { CONTORA_CONFIG_SECTION, CONTORA_IGNORE_FILE, CONTORA_LEGACY_IGNORE_FILE } from './constants';
 import { ContoraSidebarProvider } from './ui/sidebarProvider';
+import { ContoraKeyManager } from './ai/auth/keyManager';
+import { tryAppendAiSummaryOnExport } from './ai/exportOptionalAiSummary';
+import { ProviderManager } from './ai/providers/providerManager';
+import { registerPhase3AiRuntime } from './ai/registerPhase3';
 
 let scanners: WorkspaceScanner[] = [];
 let workspaceIgnoreMatcher: IgnoreMatcher | undefined;
@@ -65,13 +64,15 @@ function eventsInPrompt(): number {
 
 function readExportFormat(): ExportFormat {
   const raw = vscode.workspace.getConfiguration(CONTORA_CONFIG_SECTION).get<string>('exportFormat');
+  if (raw === 'mcp') {
+    return 'markdown';
+  }
   if (
     raw === 'json' ||
     raw === 'cursor' ||
     raw === 'markdown' ||
     raw === 'claude' ||
-    raw === 'openai' ||
-    raw === 'mcp'
+    raw === 'openai'
   ) {
     return raw;
   }
@@ -90,11 +91,6 @@ function exportTokenBudget(): number {
     return 0;
   }
   return Math.min(200_000, Math.max(500, n));
-}
-
-function cooccurrenceWindow(): number {
-  const n = vscode.workspace.getConfiguration(CONTORA_CONFIG_SECTION).get<number>('cooccurrenceWindow');
-  return typeof n === 'number' && n >= 2 ? Math.min(24, n) : 10;
 }
 
 function mergeDiskEventLogEnabled(): boolean {
@@ -243,26 +239,40 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(async (e) => {
-      if (e.affectsConfiguration('contora.maxEventBuffer')) {
-        await syncWorkspace();
-        return;
-      }
-      if (e.affectsConfiguration('contora.mergeDiskEventLog')) {
-        await mergeDiskIfEnabled(stateManager, globalEventStore);
-        return;
-      }
-      if (
-        e.affectsConfiguration('contora.useDefaultIgnoreRules') ||
-        e.affectsConfiguration('contora.extraIgnoreSubstrings')
-      ) {
-        const folder = stateManager.getPrimaryFolder();
-        if (folder && workspaceIgnoreMatcher) {
-          const cfg = vscode.workspace.getConfiguration(CONTORA_CONFIG_SECTION);
-          workspaceIgnoreMatcher.updateSettings(
-            cfg.get<boolean>('useDefaultIgnoreRules') !== false,
-            cfg.get<string[]>('extraIgnoreSubstrings') ?? [],
-          );
+      try {
+        if (e.affectsConfiguration('contora.maxEventBuffer')) {
+          await syncWorkspace();
+          return;
         }
+        if (e.affectsConfiguration('contora.mergeDiskEventLog')) {
+          await mergeDiskIfEnabled(stateManager, globalEventStore);
+          return;
+        }
+        if (
+          e.affectsConfiguration('contora.useDefaultIgnoreRules') ||
+          e.affectsConfiguration('contora.extraIgnoreSubstrings')
+        ) {
+          const folder = stateManager.getPrimaryFolder();
+          if (folder && workspaceIgnoreMatcher) {
+            const cfg = vscode.workspace.getConfiguration(CONTORA_CONFIG_SECTION);
+            workspaceIgnoreMatcher.updateSettings(
+              cfg.get<boolean>('useDefaultIgnoreRules') !== false,
+              cfg.get<string[]>('extraIgnoreSubstrings') ?? [],
+            );
+          }
+        }
+      } finally {
+        if (e.affectsConfiguration(CONTORA_CONFIG_SECTION)) {
+          void sidebar.refresh();
+        }
+      }
+    }),
+  );
+
+  context.subscriptions.push(
+    context.secrets.onDidChange((ev) => {
+      if (ev.key.startsWith('contora.apiKey.')) {
+        void sidebar.refresh();
       }
     }),
   );
@@ -270,7 +280,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const primary = stateManager.getPrimaryFolder();
   if (primary) {
     await stateManager.load(primary);
-    await autoRestoreIfEnabled(stateManager, primary);
   }
 
   const shouldIgnore = (): ((p: string) => boolean) => {
@@ -282,6 +291,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return (p: string) =>
       shouldIgnoreWorkspacePath(p, cfg.get<boolean>('useDefaultIgnoreRules') !== false, cfg.get<string[]>('extraIgnoreSubstrings') ?? []);
   };
+
+  const contoraKeys = new ContoraKeyManager(context.secrets);
+  const aiProviders = new ProviderManager(contoraKeys);
 
   const runExport = async () => {
     const folder = stateManager.getPrimaryFolder();
@@ -299,6 +311,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     for (const s of scanners) {
       await s.flushNow();
     }
+    const cfgExport = vscode.workspace.getConfiguration(CONTORA_CONFIG_SECTION);
     const state = await stateManager.load(folder);
     const sessionId = state.sessionId ?? 'unknown';
     const mode = modeEngine.normalizeMode(
@@ -318,14 +331,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     });
     const semanticMd = sumBlock.markdown;
 
-    const graphObj = buildCooccurrenceGraph(evRank, cooccurrenceWindow(), ig);
-    const graphPayload = Object.keys(graphObj).length > 0 ? graphObj : undefined;
-    const graphTxt = graphPayload ? formatContextGraphForPrompt(graphObj, 14) : '';
-
     const budget = exportTokenBudget();
     let rankedForTop = ranked;
     if (budget > 0) {
-      rankedForTop = allocate(ranked, budget, { semanticMarkdown: semanticMd, graphMarkdown: graphTxt }).priorityItems;
+      rankedForTop = allocate(ranked, budget, { semanticMarkdown: semanticMd, graphMarkdown: '' }).priorityItems;
     }
     const take = maxPriorityFilesCap(strategy.maxPriorityFiles);
     const priorityTop = rankedForTop.slice(0, take);
@@ -335,7 +344,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     applyIgnoreToMemory(memory, ig);
     memory.priorityFiles = priorityTop;
     memory.semanticSummary = semanticMd;
-    memory.contextGraphSummary = graphTxt || undefined;
+
+    const aiExtra = await tryAppendAiSummaryOnExport(
+      cfgExport,
+      memory,
+      semanticMd,
+      evRank.length,
+      aiProviders,
+    );
+    if (aiExtra) {
+      memory.aiSemanticSummary = aiExtra;
+    }
 
     const baseQ = analyzeContextQuality({
       estimatedSemanticTokens: estimateTokens(semanticMd),
@@ -367,8 +386,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       mode,
       instruction,
       strategy.strategyLabel,
-      graphPayload,
-      sumBlock.intelligence,
       quality,
     );
 
@@ -376,11 +393,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     let text = formatWithAdapter(fmt, promptText, payload, mode);
 
     if (budget > 0) {
-      if (fmt === 'json' || fmt === 'mcp') {
+      if (fmt === 'json') {
         payload = trimContextPayloadForBudget(payload, budget);
         text = formatWithAdapter(fmt, promptText, payload, mode);
       } else {
-        text = trimStringToTokenBudget(text, budget);
+        const overhead = estimateExportAdapterOverheadTokens(fmt);
+        const innerBudget = Math.max(32, budget - overhead - 2);
+        const trimmedPrompt = trimStringToTokenBudget(promptText, innerBudget);
+        text = formatWithAdapter(fmt, trimmedPrompt, payload, mode);
       }
     }
 
@@ -395,14 +415,35 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             ? 'Claude'
             : fmt === 'openai'
               ? 'OpenAI messages'
-              : fmt === 'mcp'
-                ? 'MCP getContext'
-                : 'Markdown blocks';
+              : 'Markdown blocks';
     const note = budget > 0 && estimateTokens(text) >= budget * 0.98 ? ' (trimmed to token budget)' : '';
     await vscode.window.showInformationMessage(`Contora: Copied context (${fmtLabel})${note}`);
   };
 
   context.subscriptions.push(vscode.commands.registerCommand('contora.exportAIContext', runExport));
+
+  registerPhase3AiRuntime(
+    context,
+    {
+      stateManager,
+      getEventStore: () => globalEventStore,
+      memoryBuilder,
+      modeEngine,
+      flushScanners: async () => {
+        for (const s of scanners) {
+          await s.flushNow();
+        }
+      },
+      eventsInPrompt,
+      exportTokenBudget,
+      maxPriorityFilesCap,
+      shouldIgnore,
+      refreshSidebar: () => {
+        void sidebar.refresh();
+      },
+    },
+    { keys: contoraKeys, providers: aiProviders },
+  );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('contora.saveStateNow', async () => {
@@ -434,13 +475,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             rankingDebug: pipe.debugExplanations,
           });
           const semanticMd = sumBlock.markdown;
-          const graphObj = buildCooccurrenceGraph(evRank, cooccurrenceWindow(), ig);
-          const graphPayload = Object.keys(graphObj).length > 0 ? graphObj : undefined;
-          const graphTxt = graphPayload ? formatContextGraphForPrompt(graphObj, 14) : '';
           const budget = exportTokenBudget();
           let rankedForTop = ranked;
           if (budget > 0) {
-            rankedForTop = allocate(ranked, budget, { semanticMarkdown: semanticMd, graphMarkdown: graphTxt }).priorityItems;
+            rankedForTop = allocate(ranked, budget, { semanticMarkdown: semanticMd, graphMarkdown: '' }).priorityItems;
           }
           const take = maxPriorityFilesCap(strategy.maxPriorityFiles);
           const priorityTop = rankedForTop.slice(0, take);
@@ -449,7 +487,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           applyIgnoreToMemory(memory, ig);
           memory.priorityFiles = priorityTop;
           memory.semanticSummary = semanticMd;
-          memory.contextGraphSummary = graphTxt || undefined;
           const baseQ = analyzeContextQuality({
             estimatedSemanticTokens: estimateTokens(semanticMd),
             exportTokenBudget: budget,
@@ -498,67 +535,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const st = await stateManager.load(folder);
       await restoreEditorsFromState(folder, st);
       await vscode.window.showInformationMessage('Contora: Opened editors from saved state.');
-    }),
-  );
-
-  context.subscriptions.push(
-    vscode.commands.registerCommand('contora.saveSnapshot', async () => {
-      const folder = stateManager.getPrimaryFolder();
-      if (!folder) {
-        await vscode.window.showWarningMessage('Contora: Open a folder workspace first.');
-        return;
-      }
-      for (const s of scanners) {
-        await s.flushNow();
-      }
-      const st = await stateManager.load(folder);
-      const es = globalEventStore;
-      const tail = es?.getLast(Math.min(200, eventBufferCap())) ?? [];
-      try {
-        const cp = buildCheckpoint(st, tail);
-        const fp = await writeCheckpointFile(folder.uri.fsPath, cp);
-        await vscode.window.showInformationMessage(`Contora: Checkpoint saved\n${fp}`);
-      } catch {
-        await vscode.window.showErrorMessage('Contora: Failed to write snapshot.');
-      }
-    }),
-  );
-
-  context.subscriptions.push(
-    vscode.commands.registerCommand('contora.restoreFromSnapshot', async () => {
-      const folder = stateManager.getPrimaryFolder();
-      if (!folder) {
-        await vscode.window.showWarningMessage('Contora: Open a folder workspace first.');
-        return;
-      }
-      const snaps = await listSnapshots(folder.uri.fsPath);
-      if (!snaps.length) {
-        await vscode.window.showInformationMessage('Contora: No snapshots found under .contora/snapshots or legacy .context-recall/snapshots.');
-        return;
-      }
-      const picked = await vscode.window.showQuickPick(
-        snaps.map((s) => ({
-          label: s.fileName,
-          description: new Date(s.mtimeMs).toLocaleString(),
-          fsPath: s.fsPath,
-        })),
-        { placeHolder: 'Pick a checkpoint to restore (replaces in-memory state and merges events)' },
-      );
-      if (!picked) {
-        return;
-      }
-      const data = await readCheckpointForRestore(picked.fsPath);
-      if (!data?.state) {
-        await vscode.window.showErrorMessage('Contora: Could not parse snapshot file.');
-        return;
-      }
-      await stateManager.replace(folder, data.state);
-      if (data.eventsTail?.length && globalEventStore) {
-        globalEventStore.mergeFromDisk(data.eventsTail);
-      }
-      await restoreEditorsFromState(folder, data.state);
-      await sidebar.refresh();
-      await vscode.window.showInformationMessage(`Contora: Restored from snapshot: ${picked.label}`);
     }),
   );
 

@@ -8,7 +8,32 @@ export interface SidebarSummary {
   activityLine: string;
 }
 
-/** Shape sent to the sidebar webview (paths pre-filtered). */
+/** BYOK / Phase 3 — surfaced in sidebar (keys only as present/missing, never values). */
+export interface SidebarByokPanelState {
+  aiProvider: 'off' | 'openai' | 'anthropic' | 'google' | 'deepseek';
+  keyOpenAI: boolean;
+  keyAnthropic: boolean;
+  keyGoogle: boolean;
+  keyDeepseek: boolean;
+  activeModelId: string;
+  exportFormat: string;
+  exportTokenBudget: number;
+  appendAiOnExport: boolean;
+  defaultAIMode: string;
+  /** True when a provider is selected but its SecretStorage key is missing. */
+  needsActiveProviderKey: boolean;
+}
+
+/** Last workspace intent (AI); merged into webview state in `ContoraSidebarProvider`. */
+export interface SidebarAiIntentPanel {
+  /** Bullet lines: `activeModules` from intent JSON, or `focus` when modules empty. */
+  goals: string[];
+  intentMode?: string;
+  /** File mtime of `.contora/last-intent.json`, or `Date.now()` when read from memory only. */
+  updatedAt?: number;
+}
+
+/** Shape sent to the sidebar webview (paths pre-filtered). Workspace fields only — BYOK is sent as sibling `byok` on the message. */
 export interface SidebarWebviewState {
   currentTask: string;
   notes: string;
@@ -17,6 +42,8 @@ export interface SidebarWebviewState {
   gitWorking: string[];
   summary: SidebarSummary;
   extensionVersion: string;
+  /** Optional; populated by sidebar host when loading `.contora/last-intent.json`. */
+  aiIntent?: SidebarAiIntentPanel;
 }
 
 function topActivityFolder(paths: string[]): string {
@@ -54,15 +81,15 @@ function buildSummary(
   const top = topActivityFolder([...uniq]);
   const activeFilesLine =
     n === 0
-      ? 'No engineering files in focus yet'
-      : `${n} file${n === 1 ? '' : 's'} · Mostly in ${top}`;
+      ? 'No engineering files in the working set yet'
+      : `${n} files · mostly under ${top}`;
 
   const st = staged.length;
   const wk = working.length;
   const gitLine =
     st === 0 && wk === 0
-      ? 'No uncommitted changes in tracked paths'
-      : `${st} ready to commit · ${wk} uncommitted`;
+      ? 'No pending changes in tracked paths'
+      : `${st} staged · ${wk} unstaged`;
 
   let activityLine = 'Session events not loaded';
   if (events) {
@@ -75,8 +102,8 @@ function buildSummary(
       const mins = Math.max(0, Math.round((Date.now() - last) / 60_000));
       activityLine =
         mins === 0
-          ? `Last change just now · ${nEv} event${nEv === 1 ? '' : 's'} in buffer`
-          : `Last change ~${mins} min ago · ${nEv} event${nEv === 1 ? '' : 's'} in buffer`;
+          ? `Just now · ${nEv} events in buffer`
+          : `~${mins} min ago · ${nEv} events in buffer`;
     }
   }
 

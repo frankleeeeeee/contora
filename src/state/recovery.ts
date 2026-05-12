@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import { CONTORA_CONFIG_SECTION } from '../constants';
-import { StateManager } from './stateManager';
 import { ProjectState } from '../types/state';
 
 function maxRestoreEditors(): number {
@@ -49,11 +48,3 @@ export async function restoreEditorsFromState(folder: vscode.WorkspaceFolder, st
   }
 }
 
-export async function autoRestoreIfEnabled(manager: StateManager, folder: vscode.WorkspaceFolder): Promise<void> {
-  const enabled = vscode.workspace.getConfiguration(CONTORA_CONFIG_SECTION).get<boolean>('autoRestoreOnOpen');
-  if (enabled === false) {
-    return;
-  }
-  const state = await manager.load(folder);
-  await restoreEditorsFromState(folder, state);
-}

@@ -29,7 +29,7 @@ export function trimStringToTokenBudget(text: string, budget: number): string {
   );
 }
 
-/** JSON / MCP export: shrink recentEvents, priorityFiles, and summary when over budget. */
+/** JSON export: shrink recentEvents, priorityFiles, and summary when over budget. */
 export function trimContextPayloadForBudget(payload: ContextPayloadV2, budget: number): ContextPayloadV2 {
   let p: ContextPayloadV2 = {
     ...payload,
@@ -64,6 +64,10 @@ export function trimContextPayloadForBudget(payload: ContextPayloadV2, budget: n
     const sm = p.summary.semanticMarkdown;
     if (sm.length > 120) {
       p = { ...p, summary: { semanticMarkdown: sm.slice(0, Math.floor(sm.length * 0.75)) } };
+      continue;
+    }
+    if (p.quality?.warnings?.length) {
+      p = { ...p, quality: { ...p.quality, warnings: p.quality.warnings.slice(0, Math.max(0, p.quality.warnings.length - 3)) } };
       continue;
     }
     break;

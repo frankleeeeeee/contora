@@ -31,9 +31,9 @@ export class ContextBuilder {
       lines.push(memory.semanticSummary.trim());
       lines.push('');
     }
-    if (memory.contextGraphSummary?.trim()) {
-      lines.push('# CONTEXT GRAPH (co-occurrence, weak)');
-      lines.push(memory.contextGraphSummary.trim());
+    if (memory.aiSemanticSummary?.trim()) {
+      lines.push('# AI SEMANTIC SUMMARY (BYOK, optional)');
+      lines.push(memory.aiSemanticSummary.trim());
       lines.push('');
     }
     lines.push('# GIT STATE');
